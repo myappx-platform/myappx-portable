@@ -1,0 +1,16 @@
+<service>
+  <id>__SERVICE_ID_APP__</id>
+  <name>__SERVICE_DISPLAY_APP__</name>
+  <description>__SERVICE_DESC_APP__</description>
+  <executable>cmd.exe</executable>
+  <arguments>/c "__SERVICE_SCRIPT__"</arguments>
+  <workingdirectory>__APPXSERVER_HOME__</workingdirectory>
+  <dependOn>__SERVICE_NAME_PG__</dependOn>
+  <logpath>__LOG_DIR__</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+  <stoptimeout>120 sec</stoptimeout>
+  <startmode>Manual</startmode>
+</service>

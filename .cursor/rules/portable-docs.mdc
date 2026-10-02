@@ -1,0 +1,14 @@
+---
+description: Keep myappx-portable install docs self-contained; do not link out to plugin/AI docs.
+globs: README.md,README.en.md,INSTALL*.md,workspace/README.md,workspace/README.en.md
+alwaysApply: false
+---
+
+# Portable docs stay in-repo
+
+Root `INSTALL*.md` is first-run install only. Root `README.md` / `README.en.md` is an index (layout, daily run, links) — do not copy install steps, package tables, or account lists into it. `workspace/README.md` describes `sources` / `kb` / `scratch` only.
+
+- Do **not** add links to `myappx-plugins` (extension catalog README, AI Copilot setup, knowledge base, etc.).
+- In-repo links are OK (`service/README-service.md`, `README.md`, `INSTALL.zh-CN.md`).
+- Extension install order and URLs may stay as facts in INSTALL; do not point readers at other repos for those topics.
+- Keep Chinese / English pairs in sync (`README.md` ↔ `README.en.md`, `INSTALL.zh-CN.md` ↔ `INSTALL.en.md`).

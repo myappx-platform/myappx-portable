@@ -1,0 +1,17 @@
+# Bundles copied into workspace/sources (one module per line).
+# server lines: relative to --server-root
+# plugins: lines: relative to --plugins-root
+
+# --- myappx-server ---
+org.adempiere.base
+org.adempiere.base.process
+org.adempiere.base.callout
+org.idempiere.acct
+org.compiere.db.postgresql.provider
+org.adempiere.ui.zk
+org.adempiere.server
+org.adempiere.report.jasper
+
+# --- myappx-plugins ---
+plugins:myappx-plugin-aicopilot
+plugins:id-plugin-hengsin-idempiere-mcp/org.idempiere.mcp.server
