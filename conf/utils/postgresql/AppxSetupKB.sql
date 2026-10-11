@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS kb_embed_cache (
     created         timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS kb_chunk_doc_ord_idx ON kb_chunk (document_id, chunk_index);
 CREATE INDEX IF NOT EXISTS kb_chunk_tsv_idx ON kb_chunk USING gin (tsv);
 CREATE INDEX IF NOT EXISTS kb_chunk_embed_idx ON kb_chunk USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS kb_chunk_text_trgm_idx ON kb_chunk USING gin (text gin_trgm_ops);
