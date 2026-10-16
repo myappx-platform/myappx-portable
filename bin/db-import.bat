@@ -1,5 +1,5 @@
 @echo off
-rem Import iDempiere seed into appx. DROPS and recreates the database.
+rem Import iDempiere seed into appx, then import zh_CN. DROPS and recreates the database.
 rem PostgreSQL must already be up (start-db.bat).
 
 cd /d "%~dp0.."
@@ -14,5 +14,7 @@ if errorlevel 1 (
 cd /d "%ENV_APPXSERVER_HOME%\utils"
 echo Import will DROP and recreate database appx. Product script will pause to confirm.
 call RUN_ImportIdempiere.bat
+if errorlevel 1 exit /b 1
+call "%~dp0db-lang.bat"
 if errorlevel 1 exit /b 1
 echo db-import finished.

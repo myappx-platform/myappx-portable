@@ -24,7 +24,7 @@ myappx-portable/
 ├── runtime/logs
 ├── workspace/           # sources / kb / scratch
 ├── appxserver/          # product (gitignore; zip + conf overlay)
-├── conf/                # config source (edit here, then bin\setup.bat)
+├── conf/                # config source (edit here, then bin\setup.bat; `data/lang` is the zh_CN pack)
 └── service/             # Windows services
 ```
 

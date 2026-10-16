@@ -71,9 +71,11 @@ start-db.bat
 bin\db-import.bat
 ```
 
-会暂停确认。随后：解压 seed → 重建库 `appx` / 用户 `appx` → 导入 dump → `AppxFinalizeDb`（schema `adempiere` 改名为 `appx`，并建只读角色 `appx_ro`）→ `RUN_SyncDB` → 签名。
+会暂停确认。随后：解压 seed → 重建库 `appx` / 用户 `appx` → 导入 dump → `AppxFinalizeDb`（schema `adempiere` 改名为 `appx`，并建只读角色 `appx_ro`）→ `RUN_SyncDB` → 签名 → 从 `appxserver\data\lang\zh_CN_System` 导入 zh_CN 并同步术语（该目录由 setup 从 `conf\data\lang` 覆盖而来）。语言导入日志：`runtime\logs\lang-import.log`。
 
-已有业务 dump 时改用 `bin\db-restore.bat`（读 `appxserver\data\ExpDat.dmp`），不要再跑 seed 导入。
+已有业务 dump 时改用 `bin\db-restore.bat`（读 `appxserver\data\ExpDat.dmp`），不要再跑 seed 导入。恢复不会导入语言包。
+
+已有库只想重灌 zh_CN、不删库时，用 `bin\db-lang.bat`（Postgres 须已启动）。改过 `conf\data\lang` 后先重新跑 `bin\setup.bat`。
 
 ### 步骤 4 — 启动应用
 
@@ -121,7 +123,8 @@ run-appxserver.bat
 | `run-appxserver.bat` | 前台启动应用 |
 | `bin\setup.bat` | 补齐 runtime、覆盖 conf、同步 PG 便携配置 |
 | `bin\clean.bat` | 删安装产物，回到待安装（服务或交互式 Postgres 正在运行则先停） |
-| `bin\db-import.bat` | 导入 iDempiere seed（会重建库） |
+| `bin\db-import.bat` | 导入 iDempiere seed（会重建库），然后导入 zh_CN |
+| `bin\db-lang.bat` | 在已有库上重灌 zh_CN 并同步术语（不删库；`db-import` 已包含） |
 | `bin\db-restore.bat` | 从 `ExpDat.dmp` 恢复 |
 | `bin\db-export.bat` | 导出 dump |
 | `bin\db-sync.bat` | 只跑 migration（升级时用；全新 import 已包含） |
@@ -160,7 +163,7 @@ myappx-portable/
 ├── runtime\logs         # PostgreSQL / WinSW 日志
 ├── workspace\           # sources / kb / scratch（说明见 workspace/README.md）
 ├── appxserver\          # 产品（gitignore；由 zip + conf 覆盖生成）
-├── conf\                # 配置源（init 覆盖到 appxserver）
+├── conf\                # 配置源（init 覆盖到 appxserver；`data\lang` 为 zh_CN 翻译包）
 └── service\             # Windows 服务
 ```
 

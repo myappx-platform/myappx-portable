@@ -24,7 +24,7 @@ myappx-portable/
 ├── runtime/logs
 ├── workspace/           # sources / kb / scratch
 ├── appxserver/          # 产品（gitignore；zip 解压 + conf 覆盖）
-├── conf/                # 配置源（改这里，再跑 bin\setup.bat）
+├── conf/                # 配置源（改这里，再跑 bin\setup.bat；`data/lang` 为 zh_CN 翻译包）
 └── service/             # Windows 服务
 ```
 

@@ -71,9 +71,11 @@ Listens on `localhost:15432`. Log: `runtime\logs\postgres.log`.
 bin\db-import.bat
 ```
 
-Pauses for confirmation. Then: unpack seed → recreate database `appx` / user `appx` → import dump → `AppxFinalizeDb` (rename schema `adempiere` to `appx`, create read-only role `appx_ro`) → `RUN_SyncDB` → sign.
+Pauses for confirmation. Then: unpack seed → recreate database `appx` / user `appx` → import dump → `AppxFinalizeDb` (rename schema `adempiere` to `appx`, create read-only role `appx_ro`) → `RUN_SyncDB` → sign → import zh_CN from `appxserver\data\lang\zh_CN_System` and synchronize terminology (setup copies that folder from `conf\data\lang`). Language import log: `runtime\logs\lang-import.log`.
 
-If you already have a business dump, use `bin\db-restore.bat` (reads `appxserver\data\ExpDat.dmp`) instead of seed import.
+If you already have a business dump, use `bin\db-restore.bat` (reads `appxserver\data\ExpDat.dmp`) instead of seed import. Restore does not import the language pack.
+
+To re-import zh_CN on an existing database without dropping it, run `bin\db-lang.bat` (PostgreSQL must already be up). After editing `conf\data\lang`, re-run `bin\setup.bat` first.
 
 ### Step 4 — Start the application
 
@@ -121,7 +123,8 @@ For production, change passwords, re-run `bin\setup.bat`, and sync `initdb` / ex
 | `run-appxserver.bat` | Foreground application start |
 | `bin\setup.bat` | Unpack runtime, overlay conf, sync portable PG settings |
 | `bin\clean.bat` | Delete install output, back to pre-init (stop the services or interactive Postgres if they are running) |
-| `bin\db-import.bat` | Import iDempiere seed (recreates the database) |
+| `bin\db-import.bat` | Import iDempiere seed (recreates the database), then import zh_CN |
+| `bin\db-lang.bat` | Re-import zh_CN and synchronize terminology on an existing database (does not drop it; already included in `db-import`) |
 | `bin\db-restore.bat` | Restore from `ExpDat.dmp` |
 | `bin\db-export.bat` | Export dump |
 | `bin\db-sync.bat` | Migrations only (upgrades; already included in a fresh import) |
@@ -160,7 +163,7 @@ myappx-portable/
 ├── runtime\logs         # PostgreSQL / WinSW logs
 ├── workspace\           # sources / kb / scratch (see workspace/README.md)
 ├── appxserver\          # product (gitignore; zip + conf overlay)
-├── conf\                # config source (init copies onto appxserver)
+├── conf\                # config source (init copies onto appxserver; `data\lang` is the zh_CN pack)
 └── service\             # Windows services
 ```
 
