@@ -2,6 +2,8 @@
 setlocal EnableExtensions
 rem Reset portable to pre-install: delete runtime/appxserver/generated workspace.
 rem Keeps Git sources, packages\ zips, conf\, workspace README, WinSW exe/template.
+rem   bin\clean.bat       prompt for YES
+rem   bin\clean.bat /Y    skip the prompt (bin\reset.bat)
 
 cd /d "%~dp0.."
 call "%cd%\service\service-env.bat"
@@ -47,12 +49,14 @@ echo   service\winsw\AppxServer.xml  AppxServer.exe
 echo Kept: packages\ zips, conf\, workspace README, WinSW-x64.exe
 echo Stop run-appxserver.bat if it is still running.
 echo.
+if /I "%~1"=="/Y" goto DoClean
 set /p "ANS=Type YES to continue: "
 if /I not "%ANS%"=="YES" (
     echo Cancelled.
     exit /b 1
 )
 
+:DoClean
 echo Removing generated files ...
 if exist "%ROOT%\runtime" rmdir /s /q "%ROOT%\runtime"
 if exist "%ROOT%\appxserver" rmdir /s /q "%ROOT%\appxserver"

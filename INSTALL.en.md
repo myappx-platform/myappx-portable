@@ -123,6 +123,7 @@ For production, change passwords, re-run `bin\setup.bat`, and sync `initdb` / ex
 | `run-appxserver.bat` | Foreground application start |
 | `bin\setup.bat` | Unpack runtime, overlay conf, sync portable PG settings |
 | `bin\clean.bat` | Delete install output, back to pre-init (stop the services or interactive Postgres if they are running) |
+| `bin\reset.bat` | Reset: type YES, then clean, setup, import, setup-kb; stops PostgreSQL and writes a report |
 | `bin\db-import.bat` | Import iDempiere seed (recreates the database), then import zh_CN |
 | `bin\db-lang.bat` | Re-import zh_CN and synchronize terminology on an existing database (does not drop it; already included in `db-import`) |
 | `bin\db-restore.bat` | Restore from `ExpDat.dmp` |
@@ -131,6 +132,14 @@ For production, change passwords, re-run `bin\setup.bat`, and sync `initdb` / ex
 | `bin\setup-kb.bat` | Standard KB: create `appx_kb` + pgvector, then assemble `workspace\kb` / `workspace\sources` (Postgres must be up; skips assemble if sibling repos or Python are missing) |
 | `bin\assemble\assemble-kb.bat` | Re-assemble `workspace\kb\` only (needs sibling `myappx-plugins`; `id-docs` optional) |
 | `bin\assemble\assemble-sources.bat` | Re-assemble `workspace\sources\` only (needs sibling `myappx-server` / `myappx-plugins`) |
+
+### Unattended reset
+
+`bin\reset.bat` asks for `YES` before it starts. After that it does not pause: it deletes install output, runs setup, imports the seed database, and runs `setup-kb`. PostgreSQL is stopped when it finishes. The application is not started.
+
+The report is `runtime\logs\reset-report.txt`. If the run fails before setup, the report stays at `%TEMP%\myappx-reset-report.txt` and the console prints the path actually used.
+
+If a Windows service is running, or port `18080` / `18443` is still listening, the script fails immediately and deletes nothing. Stop the services with `service\services.bat stop`, or stop `run-appxserver.bat`, then run it again.
 
 ---
 

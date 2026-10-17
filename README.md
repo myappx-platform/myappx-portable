@@ -15,7 +15,7 @@ myappx-portable/
 ├── README.md / README.en.md
 ├── INSTALL.zh-CN.md / INSTALL.en.md
 ├── start-db.bat / stop-db.bat / run-appxserver.bat
-├── bin/                 # setup、clean、db-*、setup-kb、assemble\、install-packages、env
+├── bin/                 # setup、clean、reset、db-*、setup-kb、assemble\、install-packages、env
 ├── packages/            # 离线 zip + packages.ini（zip 不进 Git）
 ├── runtime/jdk          # JAVA_HOME
 ├── runtime/pgsql        # PostgreSQL 程序

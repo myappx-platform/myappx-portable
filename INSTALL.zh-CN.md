@@ -123,6 +123,7 @@ run-appxserver.bat
 | `run-appxserver.bat` | 前台启动应用 |
 | `bin\setup.bat` | 补齐 runtime、覆盖 conf、同步 PG 便携配置 |
 | `bin\clean.bat` | 删安装产物，回到待安装（服务或交互式 Postgres 正在运行则先停） |
+| `bin\reset.bat` | 重置：先输入 YES，然后 clean、setup、导入库、setup-kb；结束时停库并写报告 |
 | `bin\db-import.bat` | 导入 iDempiere seed（会重建库），然后导入 zh_CN |
 | `bin\db-lang.bat` | 在已有库上重灌 zh_CN 并同步术语（不删库；`db-import` 已包含） |
 | `bin\db-restore.bat` | 从 `ExpDat.dmp` 恢复 |
@@ -131,6 +132,14 @@ run-appxserver.bat
 | `bin\setup-kb.bat` | 标准 KB：建 `appx_kb` + pgvector，并组装 `workspace\kb` / `workspace\sources`（Postgres 须已启动；旁路仓库或 Python 缺失则跳过组装） |
 | `bin\assemble\assemble-kb.bat` | 只重装 `workspace\kb\`（需旁边 `myappx-plugins`；`id-docs` 可选） |
 | `bin\assemble\assemble-sources.bat` | 只重装 `workspace\sources\`（需旁边 `myappx-server` / `myappx-plugins`） |
+
+### 无人值守重置
+
+`bin\reset.bat` 开始前要输入 `YES`。确认之后不再暂停：删除安装产物、重新 setup、导入种子库并执行 `setup-kb`。结束时 PostgreSQL 是停止的，不会启动应用。
+
+报告写在 `runtime\logs\reset-report.txt`。若在 `setup` 之前失败，报告留在 `%TEMP%\myappx-reset-report.txt`，控制台会打印实际路径。
+
+Windows 服务正在运行，或端口 `18080` / `18443` 仍在监听时，脚本直接失败，不删除文件。先执行 `service\services.bat stop`，或停掉 `run-appxserver.bat`。
 
 ---
 
