@@ -795,9 +795,7 @@
 <br />盘点单：存货数量变动
 <br />内部领用单：存货数量变动
 <br />成本调整单：存货金额变动
-
-<br />
-<br />更多说明参考：http://doc.oschina.net/idempiere_guide_fi?t=178385]]></value>
+]]></value>
   <value column="Placeholder" original=""/>
   <value column="PO_Description" original=""/>
   <value column="PO_Help" original=""/>
@@ -2264,7 +2262,7 @@ C[tab]任意字母 &amp; 数字 空格 转换为大写
   <value column="PrintName" original="Key column">主键列</value>
   <value column="Description" original="This column is the key in this table">与数据库列主键相同，主键列用于标识记录唯一性</value>
   <value column="Help" original="The key column must also be display sequence 0 in the field definition and may be hidden." xml:space="preserve"><![CDATA[与数据库列主键相同，主键列用于标识记录唯一性。主键列对应的字段显示可以显示（顺序为0），也可以隐藏<br />
-如果表有多个主键，则不选，表示为多主键表。具体信息参考：http://doc.oschina.net/idempiere_guide_sm?t=134396#widget_6603644]]></value>
+如果表有多个主键，则不选，表示为多主键表。]]></value>
   <value column="Placeholder" original=""/>
   <value column="PO_Description" original=""/>
   <value column="PO_Help" original=""/>
@@ -42136,7 +42134,7 @@ BOM变更申请：暂时变更，永久变更，可选变更<br />
   <value column="Name" original="A_Account_Number_Acct">账户户头</value>
   <value column="PrintName" original="A_Account_Number_Acct">账户户头</value>
   <value column="Description" original="">账户户头的账户</value>
-  <value column="Help" original="" xml:space="preserve"><![CDATA[账户户头的账户，参考：https://www.baidu.com/link?url=RYVs0wqOvYNpjVCdnhd7Ye34IMqnJUORMgNILs2BMVHzAoK7Kp9bhpvniPv8na-KM9RXViZiYf4UAPL9RCpKGq&wd=&eqid=e4ddfedf0006267d000000035a005001]]></value>
+  <value column="Help" original="" xml:space="preserve"><![CDATA[账户户头的账户]]></value>
   <value column="Placeholder" original=""/>
   <value column="PO_Description" original=""/>
   <value column="PO_Help" original=""/>
@@ -62010,8 +62008,7 @@ Yes，额外缩放目标记录子页签的关联记录。显示格式为：目�
   <value column="PrintName" original="Use Similar To">使用 Similar 函数 LIKE</value>
   <value column="Description" original="">使用高级 Similar 函数替代 LIKE 进行相似查找</value>
   <value column="Help" original="In PostgreSQL database enable using the more powerful SIMILAR TO instead of LIKE for matching queries." xml:space="preserve"><![CDATA[对于PostgreSQL 数据库，可使用更高级的相似查找函数 Similar 而不是 LIKE <br />
-在查找栏内输入 %(admin|user)% 将查找包含 admin 或者 user 的记录<br />
-注意Postgresq会缓存，更多参考 https://www.postgresql.org/docs/9.6/static/functions-matching.html#FUNCTIONS-SIMILARTO-REGEXP]]></value>
+在查找栏内输入 %(admin|user)% 将查找包含 admin 或者 user 的记录]]></value>
   <value column="Placeholder" original=""/>
   <value column="PO_Description" original=""/>
   <value column="PO_Help" original=""/>

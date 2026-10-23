@@ -1108,7 +1108,7 @@
   <value column="MsgTip" original=""/>
  </row>
  <row id="377" trl="Y">
-  <value column="MsgText" original="{0,choice,0#No Lines|1#1 Line|1&lt;{0} Lines} - {1,number,#,##0.00} - Total: {2,number,#,##0.00} {3} = {4,number,#,##0.00}">共 {0} 行 - {1,number,#,##0.00} -  总计： {3} {2,number,#,##0.00}  = {4}  {5,number,#,##0.00}</value>
+  <value column="MsgText" original="{0,choice,0#No Lines|1#1 Line|1&lt;{0} Lines} - {1,number,#,##0.00} - Total: {2,number,#,##0.00} {3} = {4,number,#,##0.00}">共 {0} 行 - {1,number,#,##0.00} - 总计：{3} {2,number,#,##0.00} = {4,number,#,##0.00}</value>
   <value column="MsgTip" original=""/>
  </row>
  <row id="378" trl="Y">
@@ -7620,7 +7620,7 @@
   <value column="MsgTip" original=""/>
  </row>
  <row id="200725" trl="N">
-  <value column="MsgText" original="The date on line {0} is not in the same period as header''s date">第｛0｝行的日期与标头的日期不在同一时期</value>
+  <value column="MsgText" original="The date on line {0} is not in the same period as header''s date">第{0}行的日期与标头的日期不在同一时期</value>
   <value column="MsgTip" original=""/>
  </row>
  <row id="200726" trl="N">
@@ -7903,7 +7903,7 @@ Please confirm by typing: <b>{0}<b/>]]></value>
   <value column="MsgTip" original=""/>
  </row>
  <row id="200820" trl="N">
-  <value column="MsgText" original="Field {0} not found in tab {1}">在页签｛1｝中找不到字段｛0｝</value>
+  <value column="MsgText" original="Field {0} not found in tab {1}">在页签{1}中找不到字段{0}</value>
   <value column="MsgTip" original=""/>
  </row>
  <row id="200821" trl="N">
@@ -7919,7 +7919,7 @@ Please confirm by typing: <b>{0}<b/>]]></value>
   <value column="MsgTip" original=""/>
  </row>
  <row id="200824" trl="N">
-  <value column="MsgText" original="Fill mandatory parameters: {0}; Mandatory parameters should be filled in the Process Parameter field of the Dashboard Content.">必填参数：｛0｝；必填参数应填写在仪表板内容的“流程参数”字段中</value>
+  <value column="MsgText" original="Fill mandatory parameters: {0}; Mandatory parameters should be filled in the Process Parameter field of the Dashboard Content.">必填参数：{0}；必填参数应填写在仪表板内容的“流程参数”字段中</value>
   <value column="MsgTip" original=""/>
  </row>
  <row id="200825" trl="N">
@@ -7969,11 +7969,11 @@ Please confirm by typing: <b>{0}<b/>]]></value>
  </row>
  <row id="200837" trl="N">
   <value column="MsgText" original="Column View does not exist in dictionary.&#10;The view column {0} exists in database but is not defined in dictionary">字典中不存在视图的列信息
-视图的列｛0｝存在于数据库中，但未在字典中定义</value>
+视图的列{0}存在于数据库中，但未在字典中定义</value>
   <value column="MsgTip" original=""/>
  </row>
  <row id="200838" trl="N">
-  <value column="MsgText" original="Record not deleted - there are dependent records in the table {0} for the column {1}">无法删除记录 - 表｛0｝中存在列｛1｝的依赖记录</value>
+  <value column="MsgText" original="Record not deleted - there are dependent records in the table {0} for the column {1}">无法删除记录 - 表{0}中存在列{1}的依赖记录</value>
   <value column="MsgTip" original=""/>
  </row>
  <row id="200845" trl="N">
@@ -8117,9 +8117,7 @@ Please confirm by typing: <b>{0}<b/>]]></value>
   <value column="MsgTip" original=""/>
  </row>
  <row id="200897" trl="N">
-  <value column="MsgText" original="Products or charges configured as 'Freight Product' or 'Freight Charge' cannot be added to this order due to the combination of delivery via rule and freight cost rule">订单头选择的发货方式和运费配置组合，不允许物料或费用为运费物料或货运费用。
-  译者注：发货方式为【送货】、运费配置为【含运费】;
-  运费物料或货运费用在租户信息页签的缺省值中定义</value>
+  <value column="MsgText" original="Products or charges configured as 'Freight Product' or 'Freight Charge' cannot be added to this order due to the combination of delivery via rule and freight cost rule">订单头选择的发货方式和运费配置组合，不允许物料或费用为运费物料或货运费用。</value>
   <value column="MsgTip" original=""/>
  </row>
  <row id="520010" trl="Y">

@@ -2,7 +2,7 @@
 <!--iDempiere(r) Release 11_2023-12-24 -Smart Suite ERP, CRM and SCM- (c) 1999-2024 iDempiere(r); Implementation: iDempiere - Supported by iDempiere community--><!--<!DOCTYPE idempiereTrl PUBLIC "-//ComPiere, Inc.//DTD iDempiere Translation 1.0//EN" "http://www.idempiere.com/dtd/idempiereTrl.dtd">--><idempiereTrl language="zh_CN" table="AD_Process">
  <row id="100" trl="Y">
   <value column="Name" original="Create Periods ">创建/更新期间</value>
-  <value column="Description" original="Create 12 standard calendar periods.">创建标准财年期间（12期）。译者注：该处理可更新处理，例如更改期间名称</value>
+  <value column="Description" original="Create 12 standard calendar periods.">创建标准财年期间（12期）。</value>
   <value column="Help" original="Creates 12 calendar month long standard periods from the specified start date.  If no start date is specified, 1st of Jan will be used.  The period name will be generated from the start date of each period using the java SimpleDateFormat pattern provided. " xml:space="preserve"><![CDATA[以指定日期为起始日期来创建12个标准财年期间，不指定将会默认为1月1日。期间名称使用“期间格式”参数（比如 yyyy-MM 表示 2017-01，格式遵循JAVA类SimpleDateFormat定义。）<br />
 如需更多期间，可新建“调整期间”，调整期间的起始日期可与其他期间重合]]></value>
  </row>
@@ -309,7 +309,7 @@
  <row id="172" trl="Y">
   <value column="Name" original="Synchronize Terminology">同步词条</value>
   <value column="Description" original="Synchronize the terminology within the system.">同步字典对象的词条（名称、描述、备注）及词条翻译</value>
-  <value column="Help" original="Based on the entries in Window Element, the fields in windows, parameters, etc. are synchronized, if they are centrally maintained.  Also synchronizes Language Translation." xml:space="preserve"><![CDATA[如果字典对象使用集中维护选项，系统将将同步词条及翻译。比如从元素同步到表、列、字段、流程参数、信息窗口字段、打印格式项，从窗口、流程、窗体、工作流等对象同步到菜单<br /> 注意，只需关注同步的词条来源，或者取消集中维护来保留场景词条<br /> 具体细节可参考：http://doc.oschina.net/idempiere_guide_sm?t=134391#widget_6525300]]></value>
+  <value column="Help" original="Based on the entries in Window Element, the fields in windows, parameters, etc. are synchronized, if they are centrally maintained.  Also synchronizes Language Translation." xml:space="preserve"><![CDATA[如果字典对象使用集中维护选项，系统将将同步词条及翻译。比如从元素同步到表、列、字段、流程参数、信息窗口字段、打印格式项，从窗口、流程、窗体、工作流等对象同步到菜单<br /> 注意，只需关注同步的词条来源，或者取消集中维护来保留场景词条]]></value>
  </row>
  <row id="173" trl="Y">
   <value column="Name" original="Create Columns from DB">从数据库创建列</value>
@@ -1032,8 +1032,7 @@
 1. 将单据记录的名称同步到翻译表的租户语言，其他语言不更新<br />
 2. 如果是”多语言单据“模式，同步会创建丢失的单据翻译记录<br />
 3. 返回同步结果<br />
-【注意】当取消”多语言单据“模式转成单语言，如果实际记录与租户语言翻译记录两者不一致时，主记录数据会覆盖翻译记录。请确认后再执行<br />
-更多参考：http://doc.oschina.net/idempiere_guide_sm?t=134391#widget_6743846]]></value>
+【注意】当取消”多语言单据“模式转成单语言，如果实际记录与租户语言翻译记录两者不一致时，主记录数据会覆盖翻译记录。请确认后再执行]]></value>
  </row>
  <row id="322" trl="Y">
   <value column="Name" original="Material Reference">物料使用报表</value>
@@ -1601,8 +1600,7 @@ DRP的常见参数：下期需量，期初计划入库量、下期安全库存�
   <value column="Description" original="Enable Native Sequence">允许使用数据库序列来管理序号</value>
   <value column="Help" original="This process allows Enable the native sequences based in the current AD_Sequence.&#10;&#10;This process should be implemented when the users are not connected." xml:space="preserve"><![CDATA[系统使用AD_Sequence表来管理表的序号，也可以直接使用数据库的Sequence序列功能来管理<br />
 流程打开SYSTEM_NATIVE_SEQUENCE参数，添加AD_Sequence/AD_Issue/AD_ChangeLog三个序列<br />
-注意：只是替换的表_ID的序号，而不是单据ID的序号。仅当所有用户离线时才能运行<br />
-参考：https://idempiere.atlassian.net/browse/IDEMPIERE-422]]></value>
+注意：只是替换的表_ID的序号，而不是单据ID的序号。仅当所有用户离线时才能运行]]></value>
  </row>
  <row id="53159" trl="Y">
   <value column="Name" original="Cost BOM Multi Level Review">成本 BOM 多级报表</value>
@@ -1781,8 +1779,7 @@ DRP的常见参数：下期需量，期初计划入库量、下期安全库存�
   <value column="Name" original="UUID Generator">生成 UUID</value>
   <value column="Description" original="">为数据库中的表添加UUID字段</value>
   <value column="Help" original="" xml:space="preserve"><![CDATA[用于为数据库的表添加"表名_uuid"字段，比如迁移旧系统或者自定义表手动添加<br />
-如果不选择表，将检查所有表。运行返回结果，详细清单可以在“流程日志”查看<br />
-参考：https://groups.google.com/d/msg/idempiere/fy9Ptgyzgxo/RFHuetfFBAAJ]]></value>
+如果不选择表，将检查所有表。运行返回结果，详细清单可以在“流程日志”查看]]></value>
  </row>
  <row id="53259" trl="Y">
   <value column="Name" original="Convert passwords to hashes">加密用户密码</value>

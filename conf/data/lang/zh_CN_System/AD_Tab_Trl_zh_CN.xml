@@ -430,9 +430,7 @@
 <br />赊销订单：完成后，自动生成发货单、发票
 <br />预付订单：完成后无动作，付款后自动生成发货单、发票
 <br />POS订单：完成后，自动生成发货单、发票、收款单
-<br />退货授权：分客户RMA和供应商RMA
-<br />
-<br />更多说明参考：http://doc.oschina.net/idempiere_guide_fi?t=178385]]></value>
+<br />退货授权：分客户RMA和供应商RMA]]></value>
  </row>
  <row id="187" trl="Y">
   <value column="Name" original="Order Line">订单明细</value>
