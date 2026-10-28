@@ -204,6 +204,10 @@ ID_DOC_TREES: tuple[tuple[str, str, str], ...] = (
     ("idempiere-skills", "docs/skills", "skills"),
 )
 
+# MCP AD skills live under myappx-plugins (not id-docs). Guidance only for Copilot KB.
+MCP_SKILLS_REL = "id-plugin-hengsin-idempiere-mcp/idempiere-mcp-skills/skills"
+MCP_SKILLS_DEST = "docs/mcp-skills"
+
 
 def copy_id_docs(docs_root: Path | None, assembled: Path) -> dict[str, int]:
     counts = {key: 0 for _, _, key in ID_DOC_TREES}
@@ -268,6 +272,18 @@ def copy_kb_corpus(plugins_root: Path, kb_output: Path, docs_root: Path | None =
 
     docs_n = copy_id_docs(docs_root, assembled)
 
+    mcp_skills_n = 0
+    mcp_src = plugins_root.joinpath(*MCP_SKILLS_REL.split("/"))
+    if mcp_src.is_dir():
+        mcp_dest = assembled.joinpath(*MCP_SKILLS_DEST.split("/"))
+        mcp_skills_n = copy_markdown_tree(mcp_src, mcp_dest)
+        if mcp_skills_n:
+            print(f"copied mcp-skills -> assembled/{MCP_SKILLS_DEST} ({mcp_skills_n} md)")
+        else:
+            print(f"kb mcp-skills: skipped (no markdown under {mcp_src})")
+    else:
+        print(f"kb mcp-skills: skipped (missing {mcp_src})")
+
     skills_n = docs_n.get("skills", 0)
     rest_n = docs_n.get("rest", 0)
     site_n = docs_n.get("site", 0)
@@ -275,6 +291,7 @@ def copy_kb_corpus(plugins_root: Path, kb_output: Path, docs_root: Path | None =
         "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "assembledReadmes": readme_n,
         "skillsMarkdown": skills_n,
+        "mcpSkillsMarkdown": mcp_skills_n,
         "docsRestMarkdown": rest_n,
         "docsSiteMarkdown": site_n,
         "dropFiles": [p.name for p in drop.iterdir() if p.is_file()],
@@ -282,7 +299,8 @@ def copy_kb_corpus(plugins_root: Path, kb_output: Path, docs_root: Path | None =
     (kb_output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(
         f"wrote {kb_output / 'manifest.json'} "
-        f"(readmes={readme_n}, skills={skills_n}, docsRest={rest_n}, docsSite={site_n})"
+        f"(readmes={readme_n}, skills={skills_n}, mcpSkills={mcp_skills_n}, "
+        f"docsRest={rest_n}, docsSite={site_n})"
     )
     return manifest
 
