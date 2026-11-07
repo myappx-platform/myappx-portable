@@ -3,6 +3,14 @@
 -- Tables:   kb_*
 -- vector / pg_trgm extensions must already exist in public.
 --
+-- This file owns every index on appx.kb_* - including the partial HNSW index
+-- kb_chunk_embed_ok_idx, which cannot be expressed as AD_TableIndex metadata
+-- (MTableIndex.createDDL() emits no WHERE clause). The AI Copilot plugin has no
+-- separate hand-applied script for it any more.
+--
+-- Idempotent: safe to re-run on an existing appx_kb to pick up new indexes;
+-- no need to drop the database unless table shape or vector width changes.
+--
 -- Requires psql:  -v db_user=appx_kb
 -- Source: myappx-portable/conf/utils/postgresql/AppxSetupKB.sql
 -- Runtime after setup.bat: {IDEMPIERE_HOME}/utils/postgresql/AppxSetupKB.sql
@@ -64,7 +72,31 @@ CREATE TABLE IF NOT EXISTS kb_embed_cache (
 
 CREATE INDEX IF NOT EXISTS kb_chunk_doc_ord_idx ON kb_chunk (document_id, chunk_index);
 CREATE INDEX IF NOT EXISTS kb_chunk_tsv_idx ON kb_chunk USING gin (tsv);
-CREATE INDEX IF NOT EXISTS kb_chunk_embed_idx ON kb_chunk USING hnsw (embedding vector_cosine_ops);
+-- ---------------------------------------------------------------------------
+-- HNSW vector index.
+--
+-- KbRepository.vectorSearch() always filters on
+--   embed_status = 'ok' AND embedding IS NOT NULL
+-- and then orders by the cosine distance operator. A full HNSW index cannot
+-- serve that predicate: pgvector walks the graph and discards non-matching rows
+-- afterwards, so recall degrades as unembedded chunks accumulate. A partial
+-- index whose predicate matches the query exactly keeps them out of the graph.
+--
+-- The full index is deliberately not created: no query uses <=> without the
+-- embed_status filter, so it would only cost write time and memory on ingest.
+-- Environments that already have kb_chunk_embed_idx keep it - this script only
+-- stops creating it, it does not drop anything. Drop it by hand if you want the
+-- space back (CREATE INDEX of the partial index below first, then
+-- DROP INDEX appx.kb_chunk_embed_idx;).
+-- ---------------------------------------------------------------------------
+CREATE INDEX IF NOT EXISTS kb_chunk_embed_ok_idx
+	ON kb_chunk USING hnsw (embedding vector_cosine_ops)
+	WHERE embed_status = 'ok' AND embedding IS NOT NULL;
+
+-- Full-index variant, kept for reference. Enable only if some future query
+-- scans embeddings without an embed_status filter:
+-- CREATE INDEX IF NOT EXISTS kb_chunk_embed_idx ON kb_chunk USING hnsw (embedding vector_cosine_ops);
+
 CREATE INDEX IF NOT EXISTS kb_chunk_text_trgm_idx ON kb_chunk USING gin (text gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS kb_document_path_trgm_idx ON kb_document USING gin (path gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS kb_document_title_trgm_idx ON kb_document USING gin (title gin_trgm_ops);
