@@ -129,6 +129,9 @@ For production, change passwords, re-run `bin\setup.bat`, and sync `initdb` / ex
 | `bin\db-restore.bat` | Restore from `ExpDat.dmp` |
 | `bin\db-export.bat` | Export dump |
 | `bin\db-sync.bat` | Migrations only (upgrades; already included in a fresh import) |
+| `bin\check-update.bat` | Report whether newer packages exist (exit 0 = current, 2 = update available, 1 = error) |
+| `bin\update.bat` | Upgrade from `packages\` (or the online manifest): backup, swap, migrate, sign, re-import zh_CN |
+| `bin\rollback-update.bat` | Restore the `appxserver.bak-<stamp>` saved by the previous update |
 | `bin\setup-kb.bat` | Standard KB: create `appx_kb` + pgvector, then assemble `workspace\kb` / `workspace\sources` (Postgres must be up; skips assemble if sibling repos or Python are missing) |
 | `bin\assemble\assemble-kb.bat` | Re-assemble `workspace\kb\` only (needs sibling `myappx-plugins`; `id-docs` optional) |
 | `bin\assemble\assemble-sources.bat` | Re-assemble `workspace\sources\` only (needs sibling `myappx-server` / `myappx-plugins`) |
@@ -163,13 +166,14 @@ myappx-portable/
 ├── README.md / README.en.md
 ├── INSTALL.zh-CN.md / INSTALL.en.md
 ├── start-db.bat / stop-db.bat / run-appxserver.bat
-├── bin\                 # init, clean, db-*, setup-*, assemble\, install-packages, env
-├── packages\            # offline zips + packages.ini
+├── bin\                 # init, clean, db-*, setup-*, assemble\, install-packages, env, update
+├── packages\            # offline zips + packages.ini (+ optional packages.json)
 ├── runtime\jdk          # JAVA_HOME
 ├── runtime\pgsql        # PostgreSQL binaries
 ├── runtime\python       # embeddable Python (assemble)
 ├── runtime\pgdata       # database files
 ├── runtime\logs         # PostgreSQL / WinSW logs
+├── runtime\backup       # dumps + extension jars taken by bin\update.bat
 ├── workspace\           # sources / kb / scratch (see workspace/README.md)
 ├── appxserver\          # product (gitignore; zip + conf overlay)
 ├── conf\                # config source (init copies onto appxserver; `data\lang` is the zh_CN pack)
@@ -180,7 +184,119 @@ Do not edit `runtime\pgdata\postgresql.portable.conf` by hand; change `conf\pg\p
 
 ---
 
-## 8. Troubleshooting
+## 8. Upgrading (update)
+
+The update feature keeps the whole portable tree in step: runtime zips, the product, the
+database and the language pack. Everything it needs can sit in `packages\`, so it works
+without a network.
+
+### 8.1 Check for updates
+
+```bat
+bin\check-update.bat
+```
+
+Prints the current and available version of every component. Exit code `0` means
+everything is current, `2` means an update is available, `1` means the check failed.
+
+Components and how their version is read:
+
+| Component | Version source |
+|---|---|
+| AppxServer | `p2.timestamp` + `org.adempiere.server` version inside the zip's `artifacts.xml` |
+| JDK / PostgreSQL / Python / pgvector | version in the zip file name |
+
+The product zip is always called `myappxserver-14.0.0.latest-*.zip`, so the file name
+alone cannot tell two builds apart; the build stamp inside the zip is what counts.
+
+### 8.2 Run the update
+
+```bat
+bin\update.bat
+```
+
+It prints the plan, asks for `YES`, then:
+
+1. preflight - services stopped, ports free, at least 6 GB free
+2. backup - `pg_dump` to `runtime\backup\<stamp>\appx.dump`, plus `globals.sql`, `conf\`,
+   `packages.ini`, the installed extension jars and `installed.json`
+3. stops the application and PostgreSQL
+4. swaps JDK / PostgreSQL / Python (and overlays pgvector) into place; the old directory
+   becomes `<name>.bak-<stamp>`
+5. unpacks the product into `appxserver.new-<stamp>`, overlays `conf\`, re-registers the
+   extension bundles in `configuration\org.eclipse.equinox.simpleconfigurator\bundles.info`,
+   then renames it to `appxserver` (the old one becomes `appxserver.bak-<stamp>`)
+6. starts PostgreSQL, runs `RUN_SyncDB`, `sign-database-build-alt` and `bin\db-lang.bat`
+7. verifies `AD_System`, the migration count, `bundles.info` and the extension states
+8. rewrites the zip names in `packages\packages.ini`, then prunes old backups
+
+Report: `runtime\logs\update-report.txt`. Per-step logs: `runtime\logs\update\<stamp>\`.
+
+Useful switches:
+
+| Switch | Effect |
+|---|---|
+| `-CheckOnly` | print the plan and stop |
+| `-Offline` | ignore the configured base URL |
+| `-StopServices` | stop the MyAppx services from the update |
+| `-SkipBackup` | skip `pg_dump` (not recommended) |
+| `-SkipDbSync` | do not run `RUN_SyncDB`; run `bin\db-sync.bat` later |
+| `-SkipLang` | do not re-import zh_CN |
+| `-AllowPgMajor` | allow a PostgreSQL major upgrade |
+| `-Start` | start the application service when done |
+
+### 8.3 Online manifest (optional)
+
+`conf\update.ini` points at a manifest instead of relying on what is already downloaded:
+
+```ini
+UPDATE_BASE_URL=https://example.com/myappx-portable
+UPDATE_CHANNEL=latest
+UPDATE_MANIFEST=packages.json
+UPDATE_OFFLINE=0
+UPDATE_KEEP_BACKUPS=3
+```
+
+Generate the manifest next to the zips:
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File bin\update\make-manifest.ps1 -BaseUrl https://example.com/myappx-portable
+```
+
+Upload `packages.json` and the zips to that URL. With a base URL set, `bin\update.bat`
+downloads only components that are newer than what is installed, verifies `sha256`, and
+falls back to the local `packages\` folder when the manifest cannot be fetched.
+
+### 8.4 PostgreSQL major upgrades
+
+A PostgreSQL major change (for example 18 to 19) needs `pg_upgrade` and is refused unless
+`-AllowPgMajor` is given. The script then:
+
+1. copies `runtime\pgdata` to `runtime\backup\<stamp>\pgdata`
+2. runs `initdb` into `runtime\pgdata.new` with the same SCRAM/UTF-8 settings
+3. runs `pg_upgrade --check` (a failure here leaves the old cluster untouched), then the
+   real `pg_upgrade`
+4. renames `pgdata` to `pgdata.bak-<stamp>` and `pgdata.new` to `pgdata`
+
+The old PostgreSQL binaries are kept as `runtime\pgsql.bak-<stamp>` because `pg_upgrade`
+needs them.
+
+### 8.5 Rollback
+
+```bat
+bin\rollback-update.bat                       :: newest backup, database stays migrated
+bin\rollback-update.bat 20261115-2312         :: specific stamp
+bin\rollback-update.bat 20261115-2312 -RestoreDb
+```
+
+Rollback swaps `appxserver.bak-<stamp>` (and `runtime\*.bak-<stamp>` when they exist) back
+into place. Migration scripts cannot be undone by code, so only `-RestoreDb` returns the
+schema to the pre-update state: it drops and recreates database `appx` from
+`runtime\backup\<stamp>\appx.dump`.
+
+---
+
+## 9. Troubleshooting
 
 | Symptom | What to do |
 |---|---|

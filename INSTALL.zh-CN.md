@@ -129,6 +129,9 @@ run-appxserver.bat
 | `bin\db-restore.bat` | 从 `ExpDat.dmp` 恢复 |
 | `bin\db-export.bat` | 导出 dump |
 | `bin\db-sync.bat` | 只跑 migration（升级时用；全新 import 已包含） |
+| `bin\check-update.bat` | 检查是否有更新的包（退出码 0=最新，2=有更新，1=出错） |
+| `bin\update.bat` | 按 `packages\`（或联网清单）升级，自动备份、迁移库、签名、重灌 zh_CN |
+| `bin\rollback-update.bat` | 回退到上一次升级前的 `appxserver.bak-<stamp>` |
 | `bin\setup-kb.bat` | 标准 KB：建 `appx_kb` + pgvector，并组装 `workspace\kb` / `workspace\sources`（Postgres 须已启动；旁路仓库或 Python 缺失则跳过组装） |
 | `bin\assemble\assemble-kb.bat` | 只重装 `workspace\kb\`（需旁边 `myappx-plugins`；`id-docs` 可选） |
 | `bin\assemble\assemble-sources.bat` | 只重装 `workspace\sources\`（需旁边 `myappx-server` / `myappx-plugins`） |
@@ -163,13 +166,14 @@ myappx-portable/
 ├── README.md / README.en.md
 ├── INSTALL.zh-CN.md / INSTALL.en.md
 ├── start-db.bat / stop-db.bat / run-appxserver.bat
-├── bin\                 # init、clean、db-*、setup-*、assemble\、install-packages、env
-├── packages\            # 离线 zip + packages.ini
+├── bin\                 # init、clean、db-*、setup-*、assemble\、install-packages、env、update
+├── packages\            # 离线 zip + packages.ini（+ 可选 packages.json）
 ├── runtime\jdk          # JAVA_HOME
 ├── runtime\pgsql        # PostgreSQL 程序
 ├── runtime\python       # embeddable Python（assemble）
 ├── runtime\pgdata       # 数据库文件
 ├── runtime\logs         # PostgreSQL / WinSW 日志
+├── runtime\backup       # bin\update.bat 的 dump 与扩展 jar
 ├── workspace\           # sources / kb / scratch（说明见 workspace/README.md）
 ├── appxserver\          # 产品（gitignore；由 zip + conf 覆盖生成）
 ├── conf\                # 配置源（init 覆盖到 appxserver；`data\lang` 为 zh_CN 翻译包）
@@ -180,7 +184,102 @@ myappx-portable/
 
 ---
 
-## 8. 常见问题
+## 8. 升级（update）
+
+update 会把整棵树一起推进：runtime 包、产品、数据库与语言包。所需文件都放在 `packages\` 即可，**不依赖网络**。
+### 8.1 检查更新
+
+```bat
+bin\check-update.bat
+```
+
+打印每个组件的当前版本与可用版本。退出码 `0` = 已最新，`2` = 有更新，`1` = 检查失败。
+
+版本从哪来：
+
+| 组件 | 版本来源 |
+|---|---|
+| AppxServer | zip 内 `artifacts.xml` 的 `p2.timestamp` 与 `org.adempiere.server` 版本 |
+| JDK / PostgreSQL / Python / pgvector | zip 文件名中的版本 |
+
+产品包名恒为 `myappxserver-14.0.0.latest-*.zip`，文件名分不出两次构建，**只有包内构建戳能区分**。
+
+### 8.2 执行升级
+
+```bat
+bin\update.bat
+```
+
+先打印计划，输入 `YES` 后：
+
+1. preflight：服务已停、端口空闲、磁盘至少 6 GB
+2. backup：`pg_dump` 到 `runtime\backup\<stamp>\appx.dump`，另存 `globals.sql`、`conf\`、`packages.ini`、已装扩展 jar 与 `installed.json`
+3. 停应用与 PostgreSQL
+4. 并排解压 JDK / PostgreSQL / Python（并 overlay pgvector）后切换，旧目录改名 `<name>.bak-<stamp>`
+5. 解压产品到 `appxserver.new-<stamp>`，覆盖 `conf\`，把扩展 bundle 重新登记到 `configuration\org.eclipse.equinox.simpleconfigurator\bundles.info`，再改名为 `appxserver`（旧的变 `appxserver.bak-<stamp>`）
+6. 启动 PostgreSQL，依次跑 `RUN_SyncDB`、`sign-database-build-alt`、`bin\db-lang.bat`
+7. 校验 `AD_System`、迁移条数、`bundles.info`、扩展状态
+8. 改写 `packages\packages.ini` 的 zip 名，清理超期备份
+
+报告：`runtime\logs\update-report.txt`；分步日志：`runtime\logs\update\<stamp>\`。
+
+常用参数：
+
+| 参数 | 作用 |
+|---|---|
+| `-CheckOnly` | 只打印计划 |
+| `-Offline` | 忽略 `conf\update.ini` 里的 base URL |
+| `-StopServices` | 由 update 停掉 MyAppx 服务 |
+| `-SkipBackup` | 跳过 `pg_dump`（不建议） |
+| `-SkipDbSync` | 不跑 `RUN_SyncDB`，之后手动 `bin\db-sync.bat` |
+| `-SkipLang` | 不重灌 zh_CN |
+| `-AllowPgMajor` | 允许 PostgreSQL 大版本升级 |
+| `-Start` | 结束后启动应用服务 |
+
+### 8.3 联网清单（可选）
+
+`conf\update.ini` 可让 update 走清单，而不是只用已下载的包：
+
+```ini
+UPDATE_BASE_URL=https://example.com/myappx-portable
+UPDATE_CHANNEL=latest
+UPDATE_MANIFEST=packages.json
+UPDATE_OFFLINE=0
+UPDATE_KEEP_BACKUPS=3
+```
+
+在 zip 旁边生成清单：
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File bin\update\make-manifest.ps1 -BaseUrl https://example.com/myappx-portable
+```
+
+把 `packages.json` 与 zip 上传到该 URL。配了 base URL 时，`bin\update.bat` 只下载比已装版本更新的组件、校验 `sha256`；清单拉不到就退回本地 `packages\`。
+
+### 8.4 PostgreSQL 大版本
+
+PostgreSQL 大版本变化（例如 18 → 19）需要 `pg_upgrade`，未加 `-AllowPgMajor` 会被拒绝。加了之后：
+
+1. 把 `runtime\pgdata` 复制到 `runtime\backup\<stamp>\pgdata`
+2. 用同样的 SCRAM/UTF-8 参数 `initdb` 到 `runtime\pgdata.new`
+3. 先 `pg_upgrade --check`（失败则原集群完全不动），再跑真正的 `pg_upgrade`
+4. `pgdata` 改名 `pgdata.bak-<stamp>`，`pgdata.new` 改名 `pgdata`
+
+旧 PostgreSQL 程序保留为 `runtime\pgsql.bak-<stamp>`，因为 `pg_upgrade` 需要它。
+
+### 8.5 回退
+
+```bat
+bin\rollback-update.bat                       :: 用最新备份，库保持已迁移
+bin\rollback-update.bat 20261115-2312         :: 指定 stamp
+bin\rollback-update.bat 20261115-2312 -RestoreDb
+```
+
+回退会把 `appxserver.bak-<stamp>`（以及存在的 `runtime\*.bak-<stamp>`）换回来。migration 脚本无法用代码回滚，只有 `-RestoreDb` 能把 schema 退回升级前：它会丢弃并按 `runtime\backup\<stamp>\appx.dump` 重建库 `appx`。
+
+---
+
+## 9. 常见问题
 
 | 现象 | 处理 |
 |---|---|

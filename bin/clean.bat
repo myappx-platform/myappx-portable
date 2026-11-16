@@ -44,6 +44,7 @@ if exist "%PGDATA%\postmaster.pid" (
 echo.
 echo This deletes install output and returns the tree to pre-init:
 echo   runtime\   appxserver\   plugins\
+echo   appxserver.bak-*  appxserver.new-*  appxserver.rolledback-*
 echo   workspace\sources  kb\assembled  kb\drop  scratch  kb\manifest.json
 echo   service\winsw\AppxServer.xml  AppxServer.exe
 echo Kept: packages\ zips, conf\, workspace README, WinSW-x64.exe
@@ -66,6 +67,8 @@ if exist "%ROOT%\service\winsw\AppxServer.xml" del /q "%ROOT%\service\winsw\Appx
 if exist "%ROOT%\service\winsw\AppxServer.exe" del /q "%ROOT%\service\winsw\AppxServer.exe"
 if exist "%ROOT%\bin\assemble\__pycache__" rmdir /s /q "%ROOT%\bin\assemble\__pycache__"
 if exist "%ROOT%\workspace\kb\manifest.json" del /q "%ROOT%\workspace\kb\manifest.json"
+rem Leftovers from bin\update.bat / bin\rollback-update.bat.
+for /d %%D in ("%ROOT%\appxserver.bak-*" "%ROOT%\appxserver.new-*" "%ROOT%\appxserver.rolledback-*") do rmdir /s /q "%%~fD"
 
 call :WipeKeepGitkeep "%ROOT%\workspace\sources"
 call :WipeKeepGitkeep "%ROOT%\workspace\scratch"

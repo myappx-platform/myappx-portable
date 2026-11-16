@@ -15,13 +15,14 @@ myappx-portable/
 ├── README.md / README.en.md
 ├── INSTALL.zh-CN.md / INSTALL.en.md
 ├── start-db.bat / stop-db.bat / run-appxserver.bat
-├── bin/                 # setup、clean、reset、db-*、setup-kb、assemble\、install-packages、env
-├── packages/            # 离线 zip + packages.ini（zip 不进 Git）
+├── bin/                 # setup、clean、reset、db-*、setup-kb、assemble\、install-packages、env、update
+├── packages/            # 离线 zip + packages.ini（+ 可选 packages.json；zip 不进 Git）
 ├── runtime/jdk          # JAVA_HOME
 ├── runtime/pgsql        # PostgreSQL 程序
 ├── runtime/python       # embeddable Python（assemble）
 ├── runtime/pgdata       # 数据目录
 ├── runtime/logs
+├── runtime/backup       # bin\update.bat 的 dump 与扩展 jar
 ├── workspace/           # sources / kb / scratch
 ├── appxserver/          # 产品（gitignore；zip 解压 + conf 覆盖）
 ├── conf/                # 配置源（改这里，再跑 bin\setup.bat；`data/lang` 为 zh_CN 翻译包）
@@ -41,3 +42,5 @@ myappx-portable/
 | OSGi | https://localhost:18443/osgi/system/console/bundles |
 
 首次安装、导入库、Extension Management 见安装文档。可选：`bin\setup-kb.bat`（含语料/源码组装）。
+
+升级：`bin\check-update.bat` 先看计划，再 `bin\update.bat`；回退用 `bin\rollback-update.bat`。详见安装文档「升级（update）」一节。

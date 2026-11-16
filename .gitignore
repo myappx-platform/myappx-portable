@@ -8,6 +8,8 @@ runtime/python/
 runtime/pgdata/
 runtime/logs/
 packages/*.zip
+packages/packages.json
+packages/*.zip.part
 workspace/sources/*
 !workspace/sources/.gitkeep
 workspace/kb/assembled/*
@@ -17,3 +19,16 @@ workspace/scratch/*
 !workspace/scratch/.gitkeep
 service/winsw/AppxServer.xml
 plugins/
+appxserver.new-*/
+appxserver.bak-*/
+appxserver.rolledback-*/
+runtime/backup/
+runtime/jdk.new/
+runtime/jdk.bak-*/
+runtime/pgsql.new/
+runtime/pgsql.bak-*/
+runtime/python.new/
+runtime/python.bak-*/
+runtime/pgdata.new/
+runtime/pgdata.bak-*/
+runtime/*.rolledback-*/
