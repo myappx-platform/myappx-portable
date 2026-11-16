@@ -1196,7 +1196,7 @@ function New-PackageManifest {
     if (-not $OutputPath) { $OutputPath = Join-Path $PackagesDir 'packages.json' }
 
     $specs = Get-ComponentSpecs
-    $channelNode = @{}
+    $channelNode = [ordered]@{}
     foreach ($spec in $specs) {
         $candidates = Get-LocalPackageCandidates -Spec $spec -PackagesDir $PackagesDir
         $best = $null
@@ -1207,26 +1207,24 @@ function New-PackageManifest {
             Write-UpdateLog -Level WARN -Message ('manifest: no package for {0}' -f $spec.Label)
             continue
         }
-        $entry = @{
-            version = $best.Version
-            file = $best.File
-            size = (Get-Item $best.Path).Length
-        }
-        if ($best.Build) { $entry.build = $best.Build }
-        if ($best.PgMajor) { $entry.pgMajor = $best.PgMajor }
-        if ($spec.Name -eq 'pgsql') { $entry.major = Get-MajorFromVersion -Version $best.Version }
-        if ($spec.Name -eq 'jdk') { $entry.major = Get-MajorFromVersion -Version $best.Version }
-        if ($BaseUrl) { $entry.url = $BaseUrl.TrimEnd('/') + '/' + $best.File }
-        if ($IncludeSha256) { $entry.sha256 = (Get-FileHash -Path $best.Path -Algorithm SHA256).Hash.ToLower() }
-        $channelNode[$spec.Name] = $entry
+        # Ordered so a regenerated manifest diffs cleanly and reads top-down.
+        $entry = [ordered]@{ version = $best.Version }
+        if ($best.Build) { $entry['build'] = $best.Build }
+        if ($spec.Name -eq 'pgsql' -or $spec.Name -eq 'jdk') { $entry['major'] = Get-MajorFromVersion -Version $best.Version }
+        if ($best.PgMajor) { $entry['pgMajor'] = $best.PgMajor }
+        $entry['file'] = $best.File
+        $entry['size'] = (Get-Item $best.Path).Length
+        if ($BaseUrl) { $entry['url'] = $BaseUrl.TrimEnd('/') + '/' + $best.File }
+        if ($IncludeSha256) { $entry['sha256'] = (Get-FileHash -Path $best.Path -Algorithm SHA256).Hash.ToLower() }
+        $channelNode[$spec.Name] = [pscustomobject]$entry
     }
 
-    $manifest = @{
+    $manifest = [ordered]@{
         schemaVersion = 1
         generatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-        channels = @{ $Channel = $channelNode }
+        channels = [ordered]@{ $Channel = [pscustomobject]$channelNode }
     }
-    Write-JsonNoBom -Path $OutputPath -Object $manifest -Depth 8
+    Write-JsonNoBom -Path $OutputPath -Object ([pscustomobject]$manifest) -Depth 8
     Write-UpdateLog -Message ('Wrote {0}' -f $OutputPath)
     return $OutputPath
 }
