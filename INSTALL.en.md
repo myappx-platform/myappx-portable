@@ -223,17 +223,24 @@ It prints the plan, asks for `YES`, then:
 
 1. preflight - ports free, at least 6 GB free, no MyAppx service running
 2. backup - `pg_dump` to `runtime\backup\<stamp>\appx.dump`, plus `globals.sql`, `conf\`,
-   `packages.ini`, the installed extension jars and `installed.json`
+   `packages.ini`, the installed customer bundles and `installed.json`
 3. stops PostgreSQL
 4. swaps JDK / PostgreSQL / Python (and overlays pgvector) into place; the old directory
    becomes `<name>.bak-<stamp>`
-5. unpacks the product into `appxserver.new-<stamp>`, overlays `conf\`, re-registers the
-   extension bundles in `configuration\org.eclipse.equinox.simpleconfigurator\bundles.info`,
-   then renames it to `appxserver` (the old one becomes `appxserver.bak-<stamp>`)
+5. unpacks the product into `appxserver.new-<stamp>`, overlays `conf\`, copies the customer
+   bundles into the new tree's `plugins\` and registers them in
+   `configuration\org.eclipse.equinox.simpleconfigurator\bundles.info`, then renames it to
+   `appxserver` (the old one becomes `appxserver.bak-<stamp>`) - only after the carried count
+   matches what was exported
 6. starts PostgreSQL, runs `RUN_SyncDB`, `sign-database-build-alt` and `bin\db-lang.bat`
 7. verifies `AD_System`, the migration count, `bundles.info` and the extension states
 8. rewrites the zip names in `packages\packages.ini`, then prunes old backups
 9. stops PostgreSQL again, whether the update succeeded or failed
+
+Customer bundles - installed through **Extension Management**, the Felix web console, or moved
+to `plugins\` by a previous update - are carried over automatically. The baseline that decides
+what counts as "customer" comes from the **package's own `bundles.info`**, not from the live
+tree; if the carried count does not match, the update aborts and the previous tree is kept.
 
 Report: `runtime\logs\update-report.txt`. Per-step logs: `runtime\logs\update\<stamp>\`.
 

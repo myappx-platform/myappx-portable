@@ -278,28 +278,54 @@ function Copy-DirectorySafely {
 }
 
 function Export-LiveExtensions {
-    param($State, [string]$AppxHome)
+    param($State, [string]$AppxHome, [string]$ProductZip)
 
-    # Export the extension bundles from the current installation so they can be re-registered
+    # Export the customer bundles from the current installation so they can be re-registered
     # after the product swap. Runs from Invoke-Backup and again from Invoke-ProductSwap, so a
     # skipped or failed backup cannot silently drop them.
+    #
+    # The baseline is the bundles.info inside the package being installed, never the live tree:
+    # Install-ExtensionBundles appends customer bundles to the live bundles.info, so a live
+    # baseline would classify them as product-owned on the following run and drop them.
     $ctx = $State.Context
     $manifestPath = Join-Path $ctx.BackupDir 'extensions.json'
-    if (Test-Path $manifestPath) { return (Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json) }
-
-    $productSymbols = @()
-    $bundlesInfo = Join-Path $AppxHome 'configuration\org.eclipse.equinox.simpleconfigurator\bundles.info'
-    if (Test-Path $bundlesInfo) {
-        $productSymbols = @((Get-BundlesInfoMap -BundlesInfoPath $bundlesInfo).Keys)
+    if (Test-Path $manifestPath) {
+        $reused = @()
+        $raw = Get-Content $manifestPath -Raw -Encoding UTF8
+        if ($raw -and $raw.Trim()) {
+            $decoded = $raw | ConvertFrom-Json
+            if ($null -ne $decoded) {
+                foreach ($item in @($decoded)) {
+                    if ($null -ne $item) { $reused += $item }
+                }
+            }
+        }
+        Write-UpdateLog -Message ('Reusing {0} previously exported extension bundle(s)' -f $reused.Count) -LogPath $State.LogPath
+        return $reused
     }
-    $extensions = @(Get-InstalledExtensionBundles -AppxHome $AppxHome -ExcludeSymbolic $productSymbols)
+
+    if (-not $ProductZip) {
+        $productRow = $State.Plan.Rows | Where-Object { $_.Name -eq 'product' } | Select-Object -First 1
+        if ($productRow -and $productRow.Target) { $ProductZip = $productRow.Target.Path }
+    }
+    if (-not $ProductZip -or -not (Test-Path $ProductZip)) {
+        throw ('cannot export customer bundles: the product package is not available ({0})' -f $ProductZip)
+    }
+
+    $productSymbols = Get-ProductBundleSymbols -ZipPath $ProductZip
+    $extensions = @(Get-InstalledExtensionBundles -AppxHome $AppxHome -ExcludeSymbolic @($productSymbols.Keys))
     if ($extensions.Count -eq 0) {
-        Write-UpdateLog -Message 'No extension bundles outside the product.' -LogPath $State.LogPath
+        Write-UpdateLog -Message ('No customer bundles outside the product (baseline {0} bundles).' -f $productSymbols.Count) -LogPath $State.LogPath
+        New-DirectoryIfMissing -Path $ctx.BackupDir | Out-Null
+        Write-JsonNoBom -Path $manifestPath -Object @()
         return @()
     }
+
     New-DirectoryIfMissing -Path $ctx.BackupDir | Out-Null
     $exported = Export-ExtensionBundles -Bundles $extensions -BackupDir $ctx.BackupDir
-    Write-UpdateLog -Message ('Exported {0} extension bundle(s) to {1}' -f $exported.Count, (Join-Path $ctx.BackupDir 'extensions')) -LogPath $State.LogPath
+    $fromPool = @($exported | Where-Object { $_.sourceKind -eq 'pool' }).Count
+    $fromPlugins = @($exported | Where-Object { $_.sourceKind -eq 'plugins' }).Count
+    Write-UpdateLog -Message ('Exported {0} customer bundle(s) to {1} (pool={2}, plugins={3})' -f $exported.Count, (Join-Path $ctx.BackupDir 'extensions'), $fromPool, $fromPlugins) -LogPath $State.LogPath
     return $exported
 }
 
@@ -389,7 +415,7 @@ function Invoke-Backup {
         Write-JsonNoBom -Path (Join-Path $ctx.BackupDir 'extension-states.json') -Object $State.ExtensionStatesBefore
     }
 
-    # Extension bundles live in the OSGi pool and would be lost with appxserver\.
+    # Customer bundles live in the OSGi pool or plugins\ and would be lost with appxserver\.
     Export-LiveExtensions -State $State -AppxHome (Join-Path $ctx.Root 'appxserver') | Out-Null
 
     if ($IncludeCluster) {
@@ -692,23 +718,68 @@ function Invoke-ProductSwap {
     Copy-TreeOverlay -Source (Join-Path $ctx.Root 'conf') -Destination $newDir
     Write-UpdateLog -Message ('conf\ overlay applied to {0}' -f (Split-Path -Leaf $newDir)) -LogPath $State.LogPath
 
-    # Re-register the extension bundles that lived in the old OSGi pool. Export first so a
-    # skipped backup (-SkipBackup) cannot drop them.
-    Export-LiveExtensions -State $State -AppxHome (Join-Path $ctx.Root 'appxserver') | Out-Null
+    # Start from a clean OSGi framework state. The product archive ships no
+    # configuration\org.eclipse.osgi today, but if a future one does, stale framework.info and a
+    # half-populated bundle pool must not shadow what bundles.info declares.
+    Clear-OsgiFrameworkState -State $State -AppxHome $newDir
+
+    # Re-register the customer bundles. Export first (with the package's own bundles.info as the
+    # baseline) so a skipped backup cannot drop them.
+    $exported = @(Export-LiveExtensions -State $State -AppxHome (Join-Path $ctx.Root 'appxserver') -ProductZip $Row.Target.Path)
+    $productSymbols = Get-ProductBundleSymbols -ZipPath $Row.Target.Path
     $extensionLog = Join-Path $ctx.UpdateLogDir 'extensions.log'
     $report = Install-ExtensionBundles -AppxHome $newDir -BackupDir $ctx.BackupDir -LogPath $extensionLog
     if ($report.Installed.Count -gt 0) {
-        Write-UpdateLog -Message ('Re-registered {0} extension bundle(s)' -f $report.Installed.Count) -LogPath $State.LogPath
+        Write-UpdateLog -Message ('Re-registered {0} customer bundle(s)' -f $report.Installed.Count) -LogPath $State.LogPath
     }
     if ($report.Replaced.Count -gt 0) {
-        Write-UpdateLog -Message ('Upgraded {0} packaged bundle(s) to the installed extension version' -f $report.Replaced.Count) -LogPath $State.LogPath
+        Write-UpdateLog -Message ('Upgraded {0} packaged bundle(s) to the installed version' -f $report.Replaced.Count) -LogPath $State.LogPath
     }
     foreach ($warning in $report.Warnings) {
         Write-UpdateLog -Level WARN -Message ('extension: {0}' -f $warning) -LogPath $State.LogPath
     }
 
+    # Confirm the new tree really carries every exported bundle before the old one is touched.
+    # A mismatch means the carry silently failed, which is exactly the 2026-11-17 incident.
+    Assert-ExtensionCarry -State $State -NewDir $newDir -Expected $exported -ProductSymbols $productSymbols
+
     $backup = Swap-Directory -LiveDir (Join-Path $ctx.Root 'appxserver') -NewDir $newDir -Stamp $ctx.Stamp
     Write-UpdateLog -Message ('Product swapped; previous installation kept at {0}' -f (Split-Path -Leaf $backup)) -LogPath $State.LogPath
+}
+
+function Clear-OsgiFrameworkState {
+    param($State, [string]$AppxHome)
+
+    $pool = Join-Path $AppxHome 'configuration\org.eclipse.osgi'
+    if (-not (Test-Path $pool)) { return }
+
+    $frameworkInfo = @(Get-ChildItem -Path $pool -Filter 'framework.info.*' -File -ErrorAction SilentlyContinue)
+    $poolDirs = @(Get-ChildItem -Path $pool -Directory -ErrorAction SilentlyContinue)
+    if ($frameworkInfo.Count -eq 0 -and $poolDirs.Count -eq 0) { return }
+
+    Write-UpdateLog -Message ('Clearing packaged OSGi framework state ({0} framework.info, {1} pool dir(s)); bundles.info is authoritative' -f $frameworkInfo.Count, $poolDirs.Count) -LogPath $State.LogPath
+    Remove-Item -Path $pool -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Assert-ExtensionCarry {
+    param($State, [string]$NewDir, $Expected, $ProductSymbols)
+
+    $expectedCount = @($Expected).Count
+    $found = @(Get-InstalledExtensionBundles -AppxHome $NewDir -ExcludeSymbolic @($ProductSymbols.Keys))
+
+    $expectedSymbols = @($Expected | ForEach-Object { $_.symbolic }) | Sort-Object
+    $foundSymbols = @($found | ForEach-Object { $_.Symbolic }) | Sort-Object
+    $missing = @($expectedSymbols | Where-Object { $foundSymbols -notcontains $_ })
+
+    $detail = ''
+    if ($missing.Count -gt 0) { $detail = '; missing: ' + ($missing -join ', ') }
+
+    Add-ReportNote -Report $State.Report -Text ('customer bundles carried: {0} exported, {1} present{2}' -f $expectedCount, $found.Count, $detail)
+    Write-UpdateLog -Message ('Customer bundle carry check: exported {0}, present {1}{2}' -f $expectedCount, $found.Count, $detail) -LogPath $State.LogPath
+
+    if ($missing.Count -gt 0 -or $found.Count -lt $expectedCount) {
+        throw ('customer bundle carry incomplete: exported {0}, found {1} in the new tree{2}. The previous tree is untouched; inspect {3}' -f $expectedCount, $found.Count, $detail, (Join-Path $State.Context.BackupDir 'extensions'))
+    }
 }
 
 # ---------------------------------------------------------------------------

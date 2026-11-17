@@ -1040,35 +1040,113 @@ function Read-ManifestIdentity {
     return [pscustomobject]@{ Symbolic = $symbolic; Version = $version }
 }
 
+function Get-ProductBundleSymbols {
+    param([Parameter(Mandatory = $true)][string]$ZipPath)
+
+    # The baseline for "what the product ships" must come from the package being installed, not
+    # from the live tree: Install-ExtensionBundles appends customer bundles to the live
+    # bundles.info, so using it as the baseline makes them look product-owned on the next run.
+    # The product archive always carries its own 388-entry bundles.info.
+    $entryName = 'appxserver/configuration/org.eclipse.equinox.simpleconfigurator/bundles.info'
+    $text = $null
+    try { $text = Get-ZipEntryText -ZipPath $ZipPath -EntryName $entryName } catch { }
+    if (-not $text) {
+        throw ('{0} has no {1}; cannot tell product bundles from customer bundles' -f (Split-Path -Leaf $ZipPath), $entryName)
+    }
+
+    $symbols = @{}
+    foreach ($line in ($text -split "`r?`n")) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed) { continue }
+        if ($trimmed.StartsWith('#')) { continue }
+        $parts = $trimmed.Split(',')
+        if ($parts.Count -lt 3) { continue }
+        $symbols[$parts[0]] = $true
+    }
+    if ($symbols.Count -eq 0) {
+        throw ('{0}: bundles.info lists no bundles' -f (Split-Path -Leaf $ZipPath))
+    }
+    return $symbols
+}
+
 function Get-InstalledExtensionBundles {
     param(
         [Parameter(Mandatory = $true)][string]$AppxHome,
         [string[]]$ExcludeSymbolic = @()
     )
 
-    $result = @()
-    $pool = Join-Path $AppxHome 'configuration\org.eclipse.osgi'
-    if (-not (Test-Path $pool)) { return $result }
+    # Customer bundles live in two places depending on how they were installed:
+    #   pool     - configuration\org.eclipse.osgi\<id>\0\bundleFile, written by Extension
+    #              Management / the Felix web console (BundleContext.installBundle)
+    #   plugins  - plugins\<symbolic>_<version>.jar, written by this update when it re-registers
+    #              bundles after a product swap
+    # Scanning only the pool silently returns 0 on a tree that a previous update populated, which
+    # is how the 2026-11-17 run dropped every customer bundle. Scan both, and let the pool win
+    # when the same symbolic name shows up twice (it is the authority the running framework uses).
+    $bySymbolic = [ordered]@{}
+    $notes = New-Object System.Collections.ArrayList
 
-    foreach ($dir in Get-ChildItem -Path $pool -Directory) {
-        $bundleFile = Join-Path $dir.FullName '0\bundleFile'
-        if (-not (Test-Path $bundleFile)) { continue }
-        $manifest = $null
-        try { $manifest = Get-ZipEntryText -ZipPath $bundleFile -EntryName 'META-INF/MANIFEST.MF' } catch { }
-        if (-not $manifest) { continue }
-        $identity = Read-ManifestIdentity -Text $manifest
-        if (-not $identity.Symbolic) { continue }
-        if ($ExcludeSymbolic -contains $identity.Symbolic) { continue }
-        $result += [pscustomobject]@{
-            Symbolic = $identity.Symbolic
-            Version = $identity.Version
-            Source = $bundleFile
-            File = ('{0}_{1}.jar' -f $identity.Symbolic, $identity.Version)
-            StartLevel = 4
-            Started = $true
+    $pool = Join-Path $AppxHome 'configuration\org.eclipse.osgi'
+    if (Test-Path $pool) {
+        foreach ($dir in Get-ChildItem -Path $pool -Directory) {
+            $bundleFile = Join-Path $dir.FullName '0\bundleFile'
+            if (-not (Test-Path $bundleFile)) { continue }
+            $identity = Get-BundleFileIdentity -Path $bundleFile
+            if (-not $identity) { continue }
+            if ($ExcludeSymbolic -contains $identity.Symbolic) { continue }
+            $bySymbolic[$identity.Symbolic] = New-ExtensionBundleEntry -Identity $identity -Source $bundleFile -SourceKind 'pool'
         }
     }
+
+    $pluginsDir = Join-Path $AppxHome 'plugins'
+    if (Test-Path $pluginsDir) {
+        foreach ($file in Get-ChildItem -Path $pluginsDir -File) {
+            if ($file.Extension -ne '.jar') { continue }
+            $identity = Get-BundleFileIdentity -Path $file.FullName
+            if (-not $identity) { continue }
+            if ($ExcludeSymbolic -contains $identity.Symbolic) { continue }
+            if ($bySymbolic.Contains($identity.Symbolic)) {
+                # Both copies exist. Keep the pool entry so the exported jar matches what the
+                # framework actually resolves, and report the duplicate instead of hiding it.
+                [void]$notes.Add(('{0} exists in both the OSGi pool and plugins\; using the pool copy' -f $identity.Symbolic))
+                continue
+            }
+            $bySymbolic[$identity.Symbolic] = New-ExtensionBundleEntry -Identity $identity -Source $file.FullName -SourceKind 'plugins'
+        }
+    }
+
+    $result = @($bySymbolic.Values)
+    foreach ($note in $notes) { Write-UpdateLog -Level WARN -Message ('extension: ' + $note) }
     return $result
+}
+
+function Get-BundleFileIdentity {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    # A bundle is either a jar or an OSGi pool "bundleFile"; both are zip archives whose
+    # META-INF/MANIFEST.MF carries Bundle-SymbolicName / Bundle-Version.
+    $manifest = $null
+    try { $manifest = Get-ZipEntryText -ZipPath $Path -EntryName 'META-INF/MANIFEST.MF' } catch { return $null }
+    if (-not $manifest) { return $null }
+    $identity = Read-ManifestIdentity -Text $manifest
+    if (-not $identity.Symbolic) { return $null }
+    return $identity
+}
+
+function New-ExtensionBundleEntry {
+    param($Identity, [string]$Source, [string]$SourceKind)
+
+    $version = $Identity.Version
+    if (-not $version) { $version = '0.0.0' }
+    return [pscustomobject]@{
+        Symbolic = $Identity.Symbolic
+        Version = $version
+        Source = $Source
+        SourceKind = $SourceKind
+        File = ('{0}_{1}.jar' -f $Identity.Symbolic, $version)
+        StartLevel = 4
+        Started = $true
+    }
 }
 
 function Export-ExtensionBundles {
@@ -1089,6 +1167,7 @@ function Export-ExtensionBundles {
             file = $bundle.File
             startLevel = $bundle.StartLevel
             started = $bundle.Started
+            sourceKind = $bundle.SourceKind
         }
     }
     Write-JsonNoBom -Path (Join-Path $BackupDir 'extensions.json') -Object @($rows)
@@ -1106,8 +1185,22 @@ function Install-ExtensionBundles {
     $report = [pscustomobject]@{ Installed = @(); Replaced = @(); Skipped = @(); Warnings = @() }
     if (-not (Test-Path $manifestPath)) { return $report }
 
-    $entries = Get-Content -Path $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($null -eq $entries) { return $report }
+    $raw = Get-Content -Path $manifestPath -Raw -Encoding UTF8
+    if (-not $raw -or -not $raw.Trim()) { return $report }
+
+    $decoded = $raw | ConvertFrom-Json
+    $entries = @()
+    if ($null -ne $decoded) {
+        foreach ($item in @($decoded)) {
+            if ($null -ne $item) { $entries += $item }
+        }
+    }
+    if ($entries.Count -eq 0) {
+        if ($LogPath) {
+            Write-TextNoBom -Path $LogPath -Text ("Extension bundles after product swap`r`ninstalled: 0`r`n")
+        }
+        return $report
+    }
 
     $bundlesInfo = Join-Path $AppxHome 'configuration\org.eclipse.equinox.simpleconfigurator\bundles.info'
     $existing = Get-BundlesInfoMap -BundlesInfoPath $bundlesInfo
@@ -1194,7 +1287,13 @@ function Set-PackagesIniNames {
     )
 
     if (-not (Test-Path $IniPath)) { return }
-    $lines = [System.IO.File]::ReadAllLines($IniPath)
+    $original = [System.IO.File]::ReadAllText($IniPath)
+    # Preserve the file's existing line endings: WriteAllLines would silently rewrite every line
+    # to CRLF and turn a one-line change into a whole-file diff.
+    $newLine = "`r`n"
+    if ($original -notmatch "`r`n" -and $original -match "`n") { $newLine = "`n" }
+
+    $lines = $original -split "`r?`n"
     $output = New-Object System.Collections.ArrayList
     foreach ($line in $lines) {
         $replaced = $false
@@ -1207,7 +1306,7 @@ function Set-PackagesIniNames {
         }
         if (-not $replaced) { [void]$output.Add($line) }
     }
-    [System.IO.File]::WriteAllLines($IniPath, $output, $script:Utf8NoBom)
+    Write-TextNoBom -Path $IniPath -Text ($output -join $newLine)
 }
 
 function Remove-OldBackups {

@@ -216,14 +216,16 @@ bin\update.bat
 先打印计划，输入 `YES` 后：
 
 1. preflight：端口空闲、磁盘至少 6 GB、无运行中的 MyAppx 服务
-2. backup：`pg_dump` 到 `runtime\backup\<stamp>\appx.dump`，另存 `globals.sql`、`conf\`、`packages.ini`、已装扩展 jar 与 `installed.json`
+2. backup：`pg_dump` 到 `runtime\backup\<stamp>\appx.dump`，另存 `globals.sql`、`conf\`、`packages.ini`、已装客户化 bundle 与 `installed.json`
 3. 停 PostgreSQL
 4. 并排解压 JDK / PostgreSQL / Python（并 overlay pgvector）后切换，旧目录改名 `<name>.bak-<stamp>`
-5. 解压产品到 `appxserver.new-<stamp>`，覆盖 `conf\`，把扩展 bundle 重新登记到 `configuration\org.eclipse.equinox.simpleconfigurator\bundles.info`，再改名为 `appxserver`（旧的变 `appxserver.bak-<stamp>`）
+5. 解压产品到 `appxserver.new-<stamp>`，覆盖 `conf\`，把客户化 bundle 复制到新树的 `plugins\` 并登记到 `configuration\org.eclipse.equinox.simpleconfigurator\bundles.info`，**比对数量一致后**才改名为 `appxserver`（旧的变 `appxserver.bak-<stamp>`）
 6. 启动 PostgreSQL，依次跑 `RUN_SyncDB`、`sign-database-build-alt`、`bin\db-lang.bat`
 7. 校验 `AD_System`、迁移条数、`bundles.info`、扩展状态
 8. 改写 `packages\packages.ini` 的 zip 名，清理超期备份
 9. **结束时停掉 PostgreSQL**（无论成功还是失败）
+
+客户化 bundle（无论由 **Extension Management**、Felix Web Console 安装，还是上一轮 update 搬到 `plugins\`）都会被自动搬运到新树。判定“哪些是客户化”的基线取自**产品 zip 内的 `bundles.info`**，不是当前安装树；搬运后若数量不符，升级会中止并保留旧树。
 
 报告：`runtime\logs\update-report.txt`；分步日志：`runtime\logs\update\<stamp>\`。
 
