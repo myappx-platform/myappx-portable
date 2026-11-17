@@ -23,17 +23,17 @@ param(
 
     [switch]$CheckOnly,
     [switch]$Offline,
-    [switch]$StopServices,
     [switch]$AllowPgMajor,
     [switch]$ClusterBackup,
     [switch]$RestoreDb,
-    [switch]$Start,
     [switch]$SkipBackup,
     [switch]$SkipDbSync,
     [switch]$SkipLang,
     [switch]$SkipPreflight,
-    [switch]$SkipServiceControl,
+    [Alias('SkipServiceControl')]
+    [switch]$SkipPortCheck,
     [switch]$OnlyChanged,
+    [switch]$Resume,
     [switch]$Force,
     [switch]$Yes,
 
@@ -210,44 +210,35 @@ function Test-Preflight {
     }
     Assert-DiskSpace -Path $ctx.Root -RequiredGb 6
 
-    $appState = Get-ServiceState -Name 'MyAppx Application'
-    $dbState = Get-ServiceState -Name 'MyAppx Database'
-    if (-not $AllowRunning) {
-        if ($appState -eq 'RUNNING' -or $dbState -eq 'RUNNING') {
-            if ($StopServices) {
-                Write-UpdateLog -Message 'Stopping MyAppx services ...' -LogPath $State.LogPath
-                & net.exe stop 'MyAppx Application' 2>&1 | Out-Null
-                & net.exe stop 'MyAppx Database' 2>&1 | Out-Null
-                $appState = Get-ServiceState -Name 'MyAppx Application'
-                $dbState = Get-ServiceState -Name 'MyAppx Database'
-                if ($appState -eq 'RUNNING' -or $dbState -eq 'RUNNING') {
-                    throw 'could not stop MyAppx services; run as Administrator or stop them with service\services.bat stop'
-                }
-            } else {
-                throw 'MyAppx services are running; stop them (service\services.bat stop) or pass -StopServices'
-            }
-        }
+    # update only supports portable mode: the application is started with run-appxserver.bat and
+    # PostgreSQL with start-db.bat. A registered Windows service would fight for the same ports.
+    Assert-PortableMode -State $State
 
+    if (-not $AllowRunning) {
+        # Only the application has to be down: the backup dump needs the database up, and it is
+        # stopped right before the swap.
         $ports = Test-PortListening -Ports @(18080, 18443, 12612)
         if ($ports.Count -gt 0) {
             throw ('port(s) {0} still listening; stop run-appxserver.bat first' -f ($ports -join ', '))
         }
     }
 
-    $pidFile = Join-Path $ctx.Root 'runtime\pgdata\postmaster.pid'
-    if ((Test-Path $pidFile) -and -not $AllowRunning) {
-        $pgReady = Join-Path $ctx.Root 'runtime\pgsql\bin\pg_isready.exe'
-        $running = $false
-        if (Test-Path $pgReady) {
-            & $pgReady -h 127.0.0.1 -p 15432 -q 2>$null
-            $running = ($LASTEXITCODE -eq 0)
-        }
-        if ($running) {
-            throw 'PostgreSQL is still running; stop it with stop-db.bat (or the service) before updating'
-        }
-    }
+    Add-ReportNote -Report $State.Report -Text 'Mode: portable (no Windows service)'
+}
 
-    Add-ReportNote -Report $State.Report -Text ('Services before update: app={0} db={1}' -f (Get-ServiceState -Name 'MyAppx Application'), (Get-ServiceState -Name 'MyAppx Database'))
+function Assert-PortableMode {
+    param($State)
+
+    # Registered services are not an error on their own (installing them is optional and they may
+    # be stopped), but a *running* one means this tree is being served in service mode, and the
+    # update would stop a service it never started.
+    $running = @()
+    foreach ($name in @('MyAppx Database', 'MyAppx Application')) {
+        if ((Get-ServiceState -Name $name) -eq 'RUNNING') { $running += $name }
+    }
+    if ($running.Count -gt 0) {
+        throw ('update only supports portable mode, but {0} is running. Stop it first: service\services.bat stop' -f ($running -join ', '))
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -330,23 +321,45 @@ function Invoke-Backup {
                 throw ('PostgreSQL is not reachable on port {0} and {1} is missing; start the database first' -f $pg.Port, $startDb)
             }
             Write-UpdateLog -Message 'Starting PostgreSQL to take the backup ...' -LogPath $State.LogPath
-            & $startDb | Out-Null
-            $ready = Wait-PgReady -PgHome $pg.PgHome -Port $pg.Port -TimeoutSec 60
+            Start-DetachedCommand -CommandLine ('call "' + $startDb + '"') -WorkingDirectory $ctx.Root `
+                -LogPath (Join-Path $ctx.UpdateLogDir 'start-db.log') | Out-Null
+            $ready = Wait-PgReady -PgHome $pg.PgHome -Port $pg.Port -TimeoutSec 90
         }
         if (-not $ready) { throw ('PostgreSQL is not reachable on port {0}; cannot take a backup' -f $pg.Port) }
 
         $dump = Join-Path $ctx.BackupDir 'appx.dump'
         $pgDump = Join-Path $pg.PgHome 'bin\pg_dump.exe'
+        Write-Host ('Dumping database {0} to {1} ...' -f $pg.Database, $dump)
+        Write-UpdateLog -Message ('pg_dump {0} -> {1}' -f $pg.Database, $dump) -LogPath $State.LogPath
+
         $previous = $env:PGPASSWORD
         $env:PGPASSWORD = $pg.Password
         try {
-            & $pgDump -h $pg.Host -p $pg.Port -U $pg.User -Fc -f $dump $pg.Database
-            if ($LASTEXITCODE -ne 0) { throw ('pg_dump failed with exit code {0}' -f $LASTEXITCODE) }
+            $dumpLog = Join-Path $ctx.UpdateLogDir 'pg_dump.log'
+            $dumpErr = $dumpLog + '.err'
+            $proc = Start-Process -FilePath $pgDump `
+                -ArgumentList @('-h', $pg.Host, '-p', [string]$pg.Port, '-U', $pg.User, '-Fc', '-f', $dump, $pg.Database) `
+                -WindowStyle Hidden -Wait -PassThru `
+                -RedirectStandardOutput $dumpLog -RedirectStandardError $dumpErr
+            if ($proc.ExitCode -ne 0) {
+                $detail = ''
+                if (Test-Path $dumpErr) { $detail = ([System.IO.File]::ReadAllText($dumpErr)).Trim() }
+                throw ('pg_dump failed with exit code {0}{1}; see {2}' -f $proc.ExitCode, $(if ($detail) { ': ' + $detail } else { '' }), $dumpErr)
+            }
+            $sizeMb = [math]::Round((Get-Item $dump).Length / 1MB, 1)
+            Write-Host ('  dump ready: {0} MB' -f $sizeMb)
+            Write-UpdateLog -Message ('pg_dump finished: {0} MB' -f $sizeMb) -LogPath $State.LogPath
 
             $env:PGPASSWORD = $pg.SystemPassword
             $globals = Join-Path $ctx.BackupDir 'globals.sql'
-            & (Join-Path $pg.PgHome 'bin\pg_dumpall.exe') -h $pg.Host -p $pg.Port -U $pg.SystemUser --globals-only -f $globals
-            if ($LASTEXITCODE -ne 0) { Write-UpdateLog -Level WARN -Message 'pg_dumpall --globals-only failed; continuing without globals backup' -LogPath $State.LogPath }
+            $gErr = (Join-Path $ctx.UpdateLogDir 'pg_dumpall.log')
+            $gProc = Start-Process -FilePath (Join-Path $pg.PgHome 'bin\pg_dumpall.exe') `
+                -ArgumentList @('-h', $pg.Host, '-p', [string]$pg.Port, '-U', $pg.SystemUser, '--globals-only', '-f', $globals) `
+                -WindowStyle Hidden -Wait -PassThru `
+                -RedirectStandardOutput $gErr -RedirectStandardError ($gErr + '.err')
+            if ($gProc.ExitCode -ne 0) {
+                Write-UpdateLog -Level WARN -Message ('pg_dumpall --globals-only failed (exit {0}); continuing without a globals backup' -f $gProc.ExitCode) -LogPath $State.LogPath
+            }
         } finally {
             $env:PGPASSWORD = $previous
         }
@@ -392,46 +405,49 @@ function Invoke-Backup {
 function Stop-Application {
     param($State)
 
-    if ($SkipServiceControl) {
-        Write-UpdateLog -Level WARN -Message 'application stop skipped (-SkipServiceControl)' -LogPath $State.LogPath
+    # Portable mode: the application runs in a console via run-appxserver.bat. Nothing to stop
+    # programmatically - just verify the ports are free.
+    if ($SkipPortCheck) {
+        Write-UpdateLog -Level WARN -Message 'port check skipped (-SkipPortCheck)' -LogPath $State.LogPath
         return
     }
 
-    $appState = Get-ServiceState -Name 'MyAppx Application'
-    if ($appState -eq 'RUNNING') {
-        & net.exe stop 'MyAppx Application' 2>&1 | Out-Null
-        $deadline = (Get-Date).AddSeconds(180)
-        while ((Get-Date) -lt $deadline) {
-            if ((Get-ServiceState -Name 'MyAppx Application') -ne 'RUNNING') { break }
-            Start-Sleep -Seconds 3
-        }
-    }
-    $ports = Test-PortListening -Ports @(18080, 18443)
+    $ports = Test-PortListening -Ports @(18080, 18443, 12612)
     if ($ports.Count -gt 0) {
-        throw ('port(s) {0} still listening after stopping the service; stop run-appxserver.bat' -f ($ports -join ', '))
+        throw ('port(s) {0} still listening; close run-appxserver.bat before updating' -f ($ports -join ', '))
     }
+    Write-UpdateLog -Message 'Application ports are free.' -LogPath $State.LogPath
 }
 
 function Stop-Database {
     param($State)
 
-    $pg = $State.Pg
-    if ($SkipServiceControl) {
-        Write-UpdateLog -Level WARN -Message 'database stop skipped (-SkipServiceControl)' -LogPath $State.LogPath
+    if ($SkipPortCheck) {
+        Write-UpdateLog -Level WARN -Message 'database stop skipped (-SkipPortCheck)' -LogPath $State.LogPath
         return
     }
-    $dbState = Get-ServiceState -Name 'MyAppx Database'
-    if ($dbState -eq 'RUNNING') {
-        & net.exe stop 'MyAppx Database' 2>&1 | Out-Null
-    } else {
-        $pgCtl = Join-Path $pg.PgHome 'bin\pg_ctl.exe'
-        if (Test-Path $pgCtl) {
-            & $pgCtl -D $pg.PgData status 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                & $pgCtl -D $pg.PgData -m fast stop 2>&1 | Out-Null
-            }
-        }
+
+    $pg = $State.Pg
+    $pgCtl = Join-Path $pg.PgHome 'bin\pg_ctl.exe'
+    if (-not (Test-Path $pgCtl)) {
+        throw ('pg_ctl.exe not found: {0}' -f $pgCtl)
     }
+
+    $ready = Join-Path $pg.PgHome 'bin\pg_isready.exe'
+    $running = $false
+    if (Test-Path $ready) {
+        & $ready -h 127.0.0.1 -p $pg.Port -q 2>$null
+        $running = ($LASTEXITCODE -eq 0)
+    }
+    if (-not $running -and -not (Test-Path (Join-Path $pg.PgData 'postmaster.pid'))) {
+        Write-UpdateLog -Message 'PostgreSQL is already stopped.' -LogPath $State.LogPath
+        return
+    }
+
+    Write-UpdateLog -Message 'Stopping PostgreSQL ...' -LogPath $State.LogPath
+    Start-DetachedCommand -CommandLine ('"' + $pgCtl + '" -D "' + $pg.PgData + '" -m fast stop') `
+        -LogPath (Join-Path $State.Context.UpdateLogDir 'stop-db.log') | Out-Null
+
     $pidFile = Join-Path $pg.PgData 'postmaster.pid'
     $deadline = (Get-Date).AddSeconds(90)
     while ((Get-Date) -lt $deadline) {
@@ -439,7 +455,7 @@ function Stop-Database {
         Start-Sleep -Seconds 2
     }
     if (Test-Path $pidFile) {
-        throw ('PostgreSQL did not stop; postmaster.pid is still present in {0}' -f $pg.PgData)
+        throw ('PostgreSQL did not stop; postmaster.pid is still present in {0}. Close any client and retry, or stop-db.bat' -f $pg.PgData)
     }
 }
 
@@ -458,19 +474,37 @@ function Start-Database {
     }
 
     $pg = $State.Pg
-    $dbState = Get-ServiceState -Name 'MyAppx Database'
-    if ($dbState -eq 'STOPPED') {
-        & net.exe start 'MyAppx Database' 2>&1 | Out-Null
-    } else {
-        $startDb = Join-Path $State.Context.Root 'start-db.bat'
-        if (-not (Test-Path $startDb)) {
-            throw ('cannot start PostgreSQL: {0} is missing' -f $startDb)
-        }
-        & $startDb | Out-Null
+    if (Wait-PgReady -PgHome $pg.PgHome -Port $pg.Port -TimeoutSec 1) { return }
+
+    # Portable mode only: PostgreSQL is started with start-db.bat (pg_ctl), which works without
+    # Administrator rights. There is no `net start` path any more.
+    $startDb = Join-Path $State.Context.Root 'start-db.bat'
+    if (-not (Test-Path $startDb)) {
+        throw ('cannot start PostgreSQL: {0} is missing' -f $startDb)
     }
+    Write-UpdateLog -Message 'Starting PostgreSQL with start-db.bat ...' -LogPath $State.LogPath
+    Start-DetachedCommand -CommandLine ('call "' + $startDb + '"') -WorkingDirectory $State.Context.Root `
+        -LogPath (Join-Path $State.Context.UpdateLogDir 'start-db.log') | Out-Null
+
     if (-not (Wait-PgReady -PgHome $pg.PgHome -Port $pg.Port -TimeoutSec 120)) {
-        throw ('PostgreSQL did not become ready on port {0}' -f $pg.Port)
+        $hint = 'Check runtime\logs\postgres.log'
+        $pgLog = Join-Path $State.Context.Root 'runtime\logs\postgres.log'
+        if (Test-Path $pgLog) {
+            $tail = Get-Content $pgLog -Tail 5 -ErrorAction SilentlyContinue
+            if ($tail) { $hint = ($tail -join ' | ') }
+        }
+        throw ('PostgreSQL did not become ready on port {0}: {1}' -f $pg.Port, $hint)
     }
+}
+
+function Stop-DatabaseAtEnd {
+    param($State)
+
+    # An unattended update must not leave the database running: the operator decides when the
+    # application starts again, and a stray postmaster would block the next update or a restart.
+    # Report rows are added by the caller (Invoke-Step), so this function stays side-effect free.
+    if (-not (Test-DatabaseInitialized -State $State)) { return }
+    Stop-Database -State $State
 }
 
 # ---------------------------------------------------------------------------
@@ -810,40 +844,6 @@ function Invoke-Verify {
     Write-UpdateLog -Message 'Verification passed.' -LogPath $State.LogPath
 }
 
-function Start-Application {
-    param($State)
-
-    $ctx = $State.Context
-    $dbState = Get-ServiceState -Name 'MyAppx Database'
-    $appState = Get-ServiceState -Name 'MyAppx Application'
-    if ($appState -ne 'ABSENT') {
-        if ($dbState -ne 'RUNNING') { & net.exe start 'MyAppx Database' 2>&1 | Out-Null }
-        & net.exe start 'MyAppx Application' 2>&1 | Out-Null
-        if (-not (Wait-PortListening -Ports @(18080, 18443) -TimeoutSec 300)) {
-            throw 'the application did not start listening on 18080/18443; check runtime\logs'
-        }
-        Write-UpdateLog -Message 'Application service started.' -LogPath $State.LogPath
-        return
-    }
-
-    $runner = Join-Path $ctx.Root 'run-appxserver.bat'
-    if (Test-Path $runner) {
-        Write-UpdateLog -Message ('Interactive mode: start the application yourself with {0}' -f $runner) -LogPath $State.LogPath
-        Add-ReportNote -Report $State.Report -Text ('Start the application with: ' + $runner)
-    }
-    Start-Sleep -Seconds 0
-}
-
-function Wait-PortListening {
-    param([int[]]$Ports, [int]$TimeoutSec)
-    $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    while ((Get-Date) -lt $deadline) {
-        if ((Test-PortListening -Ports $Ports).Count -gt 0) { return $true }
-        Start-Sleep -Seconds 5
-    }
-    return $false
-}
-
 # ---------------------------------------------------------------------------
 # Apply
 # ---------------------------------------------------------------------------
@@ -877,12 +877,19 @@ function Invoke-Apply {
         Add-ReportNote -Report $State.Report -Text ('manifest: ' + $State.Plan.RemoteStatus)
     }
 
-    if (-not $State.Plan.Changed) {
+    if (-not $State.Plan.Changed -and -not $Resume) {
         Write-Host ''
         Write-Host 'Everything is already at the newest available version. Nothing to do.'
         $path = Save-UpdateReport -Report $State.Report -Path (Join-Path $ctx.LogsDir 'update-report.txt') -FallbackPath (Join-Path $env:TEMP 'myappx-update-report.txt')
         Write-Host ('Report: {0}' -f $path)
+        Write-Host 'If a previous run stopped after the swap and the database was never migrated, run:'
+        Write-Host ('  {0} -Resume' -f (Join-Path $ctx.Root 'bin\update.bat'))
         return 0
+    }
+
+    if ($Resume -and -not $State.Plan.Changed) {
+        Write-Host ''
+        Write-Host '-Resume: re-running the database phase and verification for the installed build.'
     }
 
     if (-not $Yes) {
@@ -894,69 +901,76 @@ function Invoke-Apply {
         }
     }
 
-    Invoke-Step -State $State -Name 'download' -Body {
-        Invoke-Downloads -State $State
-    }
-
-    if ($SkipBackup) {
-        Add-SkippedStep -State $State -Name 'backup' -Note 'disabled with -SkipBackup'
-    } else {
-        Invoke-Step -State $State -Name 'backup' -Body {
-            Invoke-Backup -State $State -IncludeCluster:($State.Plan.PgMajorChange -or $ClusterBackup)
-        }
-    }
-
-    Invoke-Step -State $State -Name 'stop-application' -Body { Stop-Application -State $State }
-    Invoke-Step -State $State -Name 'stop-database' -Body { Stop-Database -State $State }
-
-    foreach ($row in $State.Plan.Rows) {
-        if ($row.Name -eq 'product' -or $row.Name -eq 'vector') { continue }
-        if ($row.Action -ne 'upgrade' -and $row.Action -ne 'install') { continue }
-        $captured = $row
-        Invoke-Step -State $State -Name ('swap-' + $captured.Name) -Body {
-            Invoke-RuntimeSwap -State $State -Row $captured
-        }
-    }
-
-    if ($State.Plan.PgMajorChange) {
-        Invoke-Step -State $State -Name 'pg-upgrade' -Body {
-            Invoke-PgMajorUpgrade -State $State
+    if ($Resume) {
+        # The product is already swapped; only the database work and verification are missing.
+        foreach ($name in 'download', 'backup', 'stop-application', 'stop-database', 'pg-upgrade', 'overlay-pgvector', 'swap-product') {
+            Add-SkippedStep -State $State -Name $name -Note 'resumed run: already applied'
         }
     } else {
-        $note = 'no data directory yet'
-        if ($ctx.PgDataMajor) { $note = ('data directory major stays {0}' -f $ctx.PgDataMajor) }
-        Add-SkippedStep -State $State -Name 'pg-upgrade' -Note $note
-    }
+        Invoke-Step -State $State -Name 'download' -Body {
+            Invoke-Downloads -State $State
+        }
 
-    # pgvector lives inside runtime\pgsql, so a PostgreSQL swap wipes it: re-overlay whenever
-    # the binaries changed, even if the pgvector package itself reports "skip".
-    $pgsqlSwapped = @($State.Plan.Rows | Where-Object { $_.Name -eq 'pgsql' -and ($_.Action -eq 'upgrade' -or $_.Action -eq 'install') }).Count -gt 0
-    $vectorRow = $State.Plan.Rows | Where-Object { $_.Name -eq 'vector' -and ($_.Action -eq 'upgrade' -or $_.Action -eq 'install' -or ($pgsqlSwapped -and $_.Target)) }
-    if ($vectorRow) {
-        if (-not (Test-Path $vectorRow.Target.Path) -and $vectorRow.Target.Url) {
-            Invoke-Step -State $State -Name 'download-pgvector' -Body {
-                Invoke-PackageDownload -Url $vectorRow.Target.Url -Destination $vectorRow.Target.Path -Sha256 $vectorRow.Target.Sha256
+        if ($SkipBackup) {
+            Add-SkippedStep -State $State -Name 'backup' -Note 'disabled with -SkipBackup'
+        } else {
+            Invoke-Step -State $State -Name 'backup' -Body {
+                Invoke-Backup -State $State -IncludeCluster:($State.Plan.PgMajorChange -or $ClusterBackup)
             }
         }
-        Invoke-Step -State $State -Name 'overlay-pgvector' -Body {
-            Invoke-VectorOverlay -State $State -Row $vectorRow
-        }
-    } elseif ($pgsqlSwapped) {
-        throw 'PostgreSQL was replaced but no pgvector package is available; add vector.v<ver>-pg<major>.zip to packages\ and re-run'
-    } else {
-        Add-SkippedStep -State $State -Name 'overlay-pgvector' -Note 'pgvector already current'
-    }
 
-    $productRow = $State.Plan.Rows | Where-Object { $_.Name -eq 'product' -and ($_.Action -eq 'upgrade' -or $_.Action -eq 'install') }
-    if ($productRow) {
-        Invoke-Step -State $State -Name 'swap-product' -Body {
-            Invoke-ProductSwap -State $State -Row $productRow
+        Invoke-Step -State $State -Name 'stop-application' -Body { Stop-Application -State $State }
+        Invoke-Step -State $State -Name 'stop-database' -Body { Stop-Database -State $State }
+
+        foreach ($row in $State.Plan.Rows) {
+            if ($row.Name -eq 'product' -or $row.Name -eq 'vector') { continue }
+            if ($row.Action -ne 'upgrade' -and $row.Action -ne 'install') { continue }
+            $captured = $row
+            Invoke-Step -State $State -Name ('swap-' + $captured.Name) -Body {
+                Invoke-RuntimeSwap -State $State -Row $captured
+            }
         }
-    } else {
-        Invoke-Step -State $State -Name 'refresh-conf' -Body {
-            Copy-TreeOverlay -Source (Join-Path $ctx.Root 'conf') -Destination (Join-Path $ctx.Root 'appxserver')
+
+        if ($State.Plan.PgMajorChange) {
+            Invoke-Step -State $State -Name 'pg-upgrade' -Body {
+                Invoke-PgMajorUpgrade -State $State
+            }
+        } else {
+            $note = 'no data directory yet'
+            if ($ctx.PgDataMajor) { $note = ('data directory major stays {0}' -f $ctx.PgDataMajor) }
+            Add-SkippedStep -State $State -Name 'pg-upgrade' -Note $note
         }
-        Add-SkippedStep -State $State -Name 'swap-product' -Note 'product already current'
+
+        # pgvector lives inside runtime\pgsql, so a PostgreSQL swap wipes it: re-overlay whenever
+        # the binaries changed, even if the pgvector package itself reports "skip".
+        $pgsqlSwapped = @($State.Plan.Rows | Where-Object { $_.Name -eq 'pgsql' -and ($_.Action -eq 'upgrade' -or $_.Action -eq 'install') }).Count -gt 0
+        $vectorRow = $State.Plan.Rows | Where-Object { $_.Name -eq 'vector' -and ($_.Action -eq 'upgrade' -or $_.Action -eq 'install' -or ($pgsqlSwapped -and $_.Target)) }
+        if ($vectorRow) {
+            if (-not (Test-Path $vectorRow.Target.Path) -and $vectorRow.Target.Url) {
+                Invoke-Step -State $State -Name 'download-pgvector' -Body {
+                    Invoke-PackageDownload -Url $vectorRow.Target.Url -Destination $vectorRow.Target.Path -Sha256 $vectorRow.Target.Sha256
+                }
+            }
+            Invoke-Step -State $State -Name 'overlay-pgvector' -Body {
+                Invoke-VectorOverlay -State $State -Row $vectorRow
+            }
+        } elseif ($pgsqlSwapped) {
+            throw 'PostgreSQL was replaced but no pgvector package is available; add vector.v<ver>-pg<major>.zip to packages\ and re-run'
+        } else {
+            Add-SkippedStep -State $State -Name 'overlay-pgvector' -Note 'pgvector already current'
+        }
+
+        $productRow = $State.Plan.Rows | Where-Object { $_.Name -eq 'product' -and ($_.Action -eq 'upgrade' -or $_.Action -eq 'install') }
+        if ($productRow) {
+            Invoke-Step -State $State -Name 'swap-product' -Body {
+                Invoke-ProductSwap -State $State -Row $productRow
+            }
+        } else {
+            Invoke-Step -State $State -Name 'refresh-conf' -Body {
+                Copy-TreeOverlay -Source (Join-Path $ctx.Root 'conf') -Destination (Join-Path $ctx.Root 'appxserver')
+            }
+            Add-SkippedStep -State $State -Name 'swap-product' -Note 'product already current'
+        }
     }
 
     Invoke-Step -State $State -Name 'start-database' -Body { Start-Database -State $State }
@@ -999,17 +1013,20 @@ function Invoke-Apply {
         Remove-OldBackups -Root $ctx.Root -Keep $ctx.Keep
     }
 
-    if ($Start) {
-        Invoke-Step -State $State -Name 'start-application' -Body { Start-Application -State $State }
-    } else {
-        Add-SkippedStep -State $State -Name 'start-application' -Note 'use -Start to start it automatically'
-    }
+    # Always leave the database stopped: the operator decides when to start the application, and
+    # a running postmaster would block the next update or a folder move. -Start is gone with
+    # service mode, so there is no conflicting request to honour.
+    Invoke-Step -State $State -Name 'stop-database-final' -Body { Stop-DatabaseAtEnd -State $State }
 
     $path = Save-UpdateReport -Report $State.Report -Path (Join-Path $ctx.LogsDir 'update-report.txt') -FallbackPath (Join-Path $env:TEMP 'myappx-update-report.txt')
     Write-Host ''
     Write-Host ('Update finished. Report: {0}' -f $path)
     Write-Host ('Per-step logs: {0}' -f $ctx.UpdateLogDir)
     Write-Host ('Backups: {0}' -f $ctx.BackupDir)
+    Write-Host ''
+    Write-Host 'PostgreSQL is stopped. Next:'
+    Write-Host ('  {0}' -f (Join-Path $ctx.Root 'start-db.bat'))
+    Write-Host ('  {0}' -f (Join-Path $ctx.Root 'run-appxserver.bat'))
     return 0
 }
 
@@ -1119,7 +1136,8 @@ function Invoke-Rollback {
             $dump = Join-Path $ctx.BackupDir 'appx.dump'
             if (-not (Test-Path $dump)) { throw ('no dump at {0}; cannot restore the database' -f $dump) }
             $pgCtl = Join-Path $State.Pg.PgHome 'bin\pg_ctl.exe'
-            & $pgCtl -D $State.Pg.PgData -m fast stop 2>&1 | Out-Null
+            Start-DetachedCommand -CommandLine ('"' + $pgCtl + '" -D "' + $State.Pg.PgData + '" -m fast stop') `
+                -LogPath (Join-Path $ctx.UpdateLogDir 'restore-stop-db.log') | Out-Null
             Start-Sleep -Seconds 3
 
             $previous = $env:PGPASSWORD
@@ -1140,7 +1158,9 @@ function Invoke-Rollback {
             } finally {
                 $env:PGPASSWORD = $previous
             }
-            & $pgCtl -D $State.Pg.PgData -l (Join-Path $ctx.Root 'runtime\logs\postgres.log') -o ('-F -p ' + $State.Pg.Port) -W start | Out-Null
+            Start-DetachedCommand -CommandLine ('"' + $pgCtl + '" -D "' + $State.Pg.PgData + '" -l "' +
+                (Join-Path $ctx.Root 'runtime\logs\postgres.log') + '" -o "-F -p ' + $State.Pg.Port + '" -W start') `
+                -LogPath (Join-Path $ctx.UpdateLogDir 'restore-start-db.log') | Out-Null
             if (-not (Wait-PgReady -PgHome $State.Pg.PgHome -Port $State.Pg.Port -TimeoutSec 120)) {
                 throw 'PostgreSQL did not restart after the database restore'
             }
@@ -1156,10 +1176,14 @@ function Invoke-Rollback {
         }
     }
 
+    Invoke-Step -State $State -Name 'stop-database-final' -Body { Stop-DatabaseAtEnd -State $State }
+
     $path = Save-UpdateReport -Report $State.Report -Path (Join-Path $ctx.LogsDir 'update-report.txt') -FallbackPath (Join-Path $env:TEMP 'myappx-update-report.txt')
     Write-Host ''
     Write-Host 'Rollback finished. Migration scripts are not reversible: only -RestoreDb returns the schema to the pre-update state.'
     Write-Host ('Report: {0}' -f $path)
+    Write-Host ''
+    Write-Host 'PostgreSQL is stopped. Start it with start-db.bat when you are ready.'
     return 0
 }
 
@@ -1203,6 +1227,29 @@ try {
         $state.Report.Overall = 1
         $path = Save-UpdateReport -Report $state.Report -Path (Join-Path $state.Context.LogsDir 'update-report.txt') -FallbackPath (Join-Path $env:TEMP 'myappx-update-report.txt')
         Write-Host ('Report: {0}' -f $path)
+    }
+    # A failed run must not leave PostgreSQL running either: the operator needs a predictable
+    # state before retrying, and postmaster.pid would block the next attempt.
+    if ($state -and $state.Context) {
+        try {
+            $pgInfo = Get-PgConnectionInfo -Root $state.Context.Root
+            $ready = Join-Path $pgInfo.PgHome 'bin\pg_isready.exe'
+            $stillUp = $false
+            if (Test-Path $ready) {
+                & $ready -h 127.0.0.1 -p $pgInfo.Port -q 2>$null
+                $stillUp = ($LASTEXITCODE -eq 0)
+            }
+            if ($stillUp) {
+                Write-Host 'Stopping PostgreSQL after the failure ...'
+                $pgCtl = Join-Path $pgInfo.PgHome 'bin\pg_ctl.exe'
+                if (Test-Path $pgCtl) {
+                    Start-DetachedCommand -CommandLine ('"' + $pgCtl + '" -D "' + $pgInfo.PgData + '" -m fast stop') `
+                        -LogPath (Join-Path $state.Context.UpdateLogDir 'stop-db-after-failure.log') | Out-Null
+                }
+            }
+        } catch {
+            Write-Host ('Could not stop PostgreSQL: {0}' -f $_.Exception.Message)
+        }
     }
     $exitCode = 1
 } finally {

@@ -206,22 +206,33 @@ bin\check-update.bat
 
 ### 8.2 执行升级
 
+> **update 只支持便携模式。** 应用用 `run-appxserver.bat` 启动，PostgreSQL 用 `start-db.bat` 启动。
+> 如果 `MyAppx Database` / `MyAppx Application` 服务正在运行，update 会直接拒绝，请先 `service\services.bat stop`。
+
 ```bat
 bin\update.bat
 ```
 
 先打印计划，输入 `YES` 后：
 
-1. preflight：服务已停、端口空闲、磁盘至少 6 GB
+1. preflight：端口空闲、磁盘至少 6 GB、无运行中的 MyAppx 服务
 2. backup：`pg_dump` 到 `runtime\backup\<stamp>\appx.dump`，另存 `globals.sql`、`conf\`、`packages.ini`、已装扩展 jar 与 `installed.json`
-3. 停应用与 PostgreSQL
+3. 停 PostgreSQL
 4. 并排解压 JDK / PostgreSQL / Python（并 overlay pgvector）后切换，旧目录改名 `<name>.bak-<stamp>`
 5. 解压产品到 `appxserver.new-<stamp>`，覆盖 `conf\`，把扩展 bundle 重新登记到 `configuration\org.eclipse.equinox.simpleconfigurator\bundles.info`，再改名为 `appxserver`（旧的变 `appxserver.bak-<stamp>`）
 6. 启动 PostgreSQL，依次跑 `RUN_SyncDB`、`sign-database-build-alt`、`bin\db-lang.bat`
 7. 校验 `AD_System`、迁移条数、`bundles.info`、扩展状态
 8. 改写 `packages\packages.ini` 的 zip 名，清理超期备份
+9. **结束时停掉 PostgreSQL**（无论成功还是失败）
 
 报告：`runtime\logs\update-report.txt`；分步日志：`runtime\logs\update\<stamp>\`。
+
+升级完成后按顺序启动即可：
+
+```bat
+start-db.bat
+run-appxserver.bat
+```
 
 常用参数：
 
@@ -229,12 +240,12 @@ bin\update.bat
 |---|---|
 | `-CheckOnly` | 只打印计划 |
 | `-Offline` | 忽略 `conf\update.ini` 里的 base URL |
-| `-StopServices` | 由 update 停掉 MyAppx 服务 |
 | `-SkipBackup` | 跳过 `pg_dump`（不建议） |
 | `-SkipDbSync` | 不跑 `RUN_SyncDB`，之后手动 `bin\db-sync.bat` |
 | `-SkipLang` | 不重灌 zh_CN |
 | `-AllowPgMajor` | 允许 PostgreSQL 大版本升级 |
-| `-Start` | 结束后启动应用服务 |
+| `-Resume` | 上次升级在换包后中断时，只补跑数据库阶段 |
+| `-Force` | 对已是最新的组件强制再走一遍 |
 
 ### 8.3 联网清单（可选）
 

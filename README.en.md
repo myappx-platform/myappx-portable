@@ -43,4 +43,4 @@ Do **not** use both modes on the same machine (ports `15432` / `18080` / `18443`
 
 First-time install, database import, and Extension Management are in the install guide. Optional: `bin\setup-kb.bat` (includes corpus/source assemble).
 
-Upgrade: `bin\check-update.bat` for the plan, then `bin\update.bat`; `bin\rollback-update.bat` restores the previous copy. See the "Upgrading (update)" section of the install guide.
+Upgrade: `bin\check-update.bat` for the plan, then `bin\update.bat` (**portable mode only**; it stops PostgreSQL when it finishes, so start it again with `start-db.bat` + `run-appxserver.bat`); `bin\rollback-update.bat` restores the previous copy. See the "Upgrading (update)" section of the install guide.

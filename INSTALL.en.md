@@ -211,16 +211,20 @@ alone cannot tell two builds apart; the build stamp inside the zip is what count
 
 ### 8.2 Run the update
 
+> **The update only supports portable mode.** The application runs from `run-appxserver.bat`
+> and PostgreSQL from `start-db.bat`. If `MyAppx Database` / `MyAppx Application` is running as a
+> Windows service, the update refuses to start - stop it with `service\services.bat stop` first.
+
 ```bat
 bin\update.bat
 ```
 
 It prints the plan, asks for `YES`, then:
 
-1. preflight - services stopped, ports free, at least 6 GB free
+1. preflight - ports free, at least 6 GB free, no MyAppx service running
 2. backup - `pg_dump` to `runtime\backup\<stamp>\appx.dump`, plus `globals.sql`, `conf\`,
    `packages.ini`, the installed extension jars and `installed.json`
-3. stops the application and PostgreSQL
+3. stops PostgreSQL
 4. swaps JDK / PostgreSQL / Python (and overlays pgvector) into place; the old directory
    becomes `<name>.bak-<stamp>`
 5. unpacks the product into `appxserver.new-<stamp>`, overlays `conf\`, re-registers the
@@ -229,8 +233,16 @@ It prints the plan, asks for `YES`, then:
 6. starts PostgreSQL, runs `RUN_SyncDB`, `sign-database-build-alt` and `bin\db-lang.bat`
 7. verifies `AD_System`, the migration count, `bundles.info` and the extension states
 8. rewrites the zip names in `packages\packages.ini`, then prunes old backups
+9. stops PostgreSQL again, whether the update succeeded or failed
 
 Report: `runtime\logs\update-report.txt`. Per-step logs: `runtime\logs\update\<stamp>\`.
+
+After the update, start the tree in this order:
+
+```bat
+start-db.bat
+run-appxserver.bat
+```
 
 Useful switches:
 
@@ -238,12 +250,12 @@ Useful switches:
 |---|---|
 | `-CheckOnly` | print the plan and stop |
 | `-Offline` | ignore the configured base URL |
-| `-StopServices` | stop the MyAppx services from the update |
 | `-SkipBackup` | skip `pg_dump` (not recommended) |
 | `-SkipDbSync` | do not run `RUN_SyncDB`; run `bin\db-sync.bat` later |
 | `-SkipLang` | do not re-import zh_CN |
 | `-AllowPgMajor` | allow a PostgreSQL major upgrade |
-| `-Start` | start the application service when done |
+| `-Resume` | finish the database phase after a run that stopped mid-way |
+| `-Force` | re-apply components that already report "skip" |
 
 ### 8.3 Online manifest (optional)
 

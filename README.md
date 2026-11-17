@@ -43,4 +43,4 @@ myappx-portable/
 
 首次安装、导入库、Extension Management 见安装文档。可选：`bin\setup-kb.bat`（含语料/源码组装）。
 
-升级：`bin\check-update.bat` 先看计划，再 `bin\update.bat`；回退用 `bin\rollback-update.bat`。详见安装文档「升级（update）」一节。
+升级：`bin\check-update.bat` 先看计划，再 `bin\update.bat`（**仅便携模式**，结束时会停库，之后用 `start-db.bat` + `run-appxserver.bat` 启动）；回退用 `bin\rollback-update.bat`。详见安装文档「升级（update）」。

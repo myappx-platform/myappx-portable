@@ -792,6 +792,58 @@ function Expand-VectorOverlay {
 # Process helpers
 # ---------------------------------------------------------------------------
 
+function Invoke-ProcessFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [string]$WorkingDirectory,
+        [string]$LogPath
+    )
+
+    # Launches a console program without touching its standard streams.
+    #
+    # Why this exists instead of `& $exe ... | Out-Null` or Start-Process -RedirectStandardOutput:
+    # any PowerShell redirection or pipeline creates a pipe. A command that starts a long-lived
+    # process (start-db.bat -> pg_ctl -> postgres.exe, net start, a daemon) leaves that process
+    # holding the write end, so PowerShell waits for the daemon and the update appears to hang
+    # forever. Here nothing is redirected: the caller redirects inside a .bat if it wants a log,
+    # and WaitForExit only ever waits for this one process.
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    if ($ArgumentList -and $ArgumentList.Count -gt 0) {
+        # .NET Framework (Windows PowerShell 5.1) has no ArgumentList; quote arguments ourselves.
+        $quoted = @()
+        foreach ($arg in $ArgumentList) {
+            if ($arg -match '[\s"]' -and -not ($arg.StartsWith('"') -and $arg.EndsWith('"'))) {
+                $quoted += '"' + ($arg -replace '"', '\"') + '"'
+            } else {
+                $quoted += $arg
+            }
+        }
+        $psi.Arguments = ($quoted -join ' ')
+    }
+    if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $false
+    $psi.RedirectStandardOutput = $false
+    $psi.RedirectStandardError = $false
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $psi
+    [void]$process.Start()
+    $process.WaitForExit()
+    $code = $process.ExitCode
+    $process.Dispose()
+
+    if ($LogPath -and (Test-Path $LogPath)) {
+        # Surface the tail so the operator sees progress, bounded so huge logs stay out of the way.
+        $tail = Get-Content -Path $LogPath -Tail 20 -ErrorAction SilentlyContinue
+        if ($tail) { Write-Host (($tail -join [Environment]::NewLine)) }
+    }
+    return $code
+}
+
 function Invoke-CommandToLog {
     param(
         [Parameter(Mandatory = $true)][string]$LogPath,
@@ -810,19 +862,42 @@ function Invoke-CommandToLog {
     [void]$sb.AppendLine('setlocal')
     if ($EnvBat) { [void]$sb.AppendLine('call "' + $EnvBat + '" >nul 2>&1') }
     if ($WorkingDirectory) { [void]$sb.AppendLine('cd /d "' + $WorkingDirectory + '"') }
-    [void]$sb.AppendLine('(' + $CommandLine + ') > "' + $LogPath + '" 2>&1')
+    [void]$sb.AppendLine('(' + $CommandLine + ') > "' + $LogPath + '" 2>&1 < nul')
     [void]$sb.AppendLine('set "RC=%ERRORLEVEL%"')
     [void]$sb.AppendLine('endlocal & exit /b %RC%')
     [System.IO.File]::WriteAllText($tmp, $sb.ToString(), [System.Text.Encoding]::Default)
 
     try {
-        if ($CaptureStdio) {
-            $output = & $env:ComSpec /c $tmp 2>&1
-            if ($output) { Write-Host ($output | Out-String) }
-        } else {
-            & $env:ComSpec /c $tmp | Out-Null
-        }
-        return $LASTEXITCODE
+        $rc = Invoke-ProcessFile -FilePath $env:ComSpec -ArgumentList @('/c', $tmp) -WorkingDirectory $WorkingDirectory `
+            -LogPath $(if ($CaptureStdio) { $LogPath } else { $null })
+        return $rc
+    } finally {
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-DetachedCommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$CommandLine,
+        [string]$WorkingDirectory,
+        [string]$LogPath
+    )
+
+    # For scripts that start a daemon and should return as soon as the script itself exits
+    # (start-db.bat, pg_ctl start, net start). See Invoke-ProcessFile for why no redirection.
+    $tmp = Join-Path $env:TEMP ('appx-detach-' + [guid]::NewGuid().ToString('N') + '.cmd')
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('@echo off')
+    if ($WorkingDirectory) { [void]$sb.AppendLine('cd /d "' + $WorkingDirectory + '"') }
+    if ($LogPath) {
+        [void]$sb.AppendLine('(' + $CommandLine + ') > "' + $LogPath + '" 2>&1 < nul')
+    } else {
+        [void]$sb.AppendLine('(' + $CommandLine + ') > nul 2>&1 < nul')
+    }
+    [System.IO.File]::WriteAllText($tmp, $sb.ToString(), [System.Text.Encoding]::Default)
+
+    try {
+        return (Invoke-ProcessFile -FilePath $env:ComSpec -ArgumentList @('/c', $tmp) -WorkingDirectory $WorkingDirectory)
     } finally {
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     }
