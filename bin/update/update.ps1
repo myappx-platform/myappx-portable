@@ -285,8 +285,8 @@ function Export-LiveExtensions {
     # skipped or failed backup cannot silently drop them.
     #
     # The baseline is the bundles.info inside the package being installed, never the live tree:
-    # Install-ExtensionBundles appends customer bundles to the live bundles.info, so a live
-    # baseline would classify them as product-owned on the following run and drop them.
+    # a live tree may already list customer bundles from an earlier Extension Management install,
+    # and those must still be recognised as customer bundles.
     $ctx = $State.Context
     $manifestPath = Join-Path $ctx.BackupDir 'extensions.json'
     if (Test-Path $manifestPath) {
@@ -723,25 +723,34 @@ function Invoke-ProductSwap {
     # half-populated bundle pool must not shadow what bundles.info declares.
     Clear-OsgiFrameworkState -State $State -AppxHome $newDir
 
-    # Re-register the customer bundles. Export first (with the package's own bundles.info as the
-    # baseline) so a skipped backup cannot drop them.
+    # Customer bundles are NOT re-registered here. Extension Management installs them with an
+    # HTTP location (installBundle(downloadUrl, stream)); writing the same jar to plugins/ and
+    # listing it in bundles.info would give the bundle a second, different location, and a
+    # singleton bundle cannot resolve from two locations at once ("Another singleton bundle
+    # selected"). Export only: keep the jars as evidence plus a reinstall list.
     $exported = @(Export-LiveExtensions -State $State -AppxHome (Join-Path $ctx.Root 'appxserver') -ProductZip $Row.Target.Path)
-    $productSymbols = Get-ProductBundleSymbols -ZipPath $Row.Target.Path
     $extensionLog = Join-Path $ctx.UpdateLogDir 'extensions.log'
-    $report = Install-ExtensionBundles -AppxHome $newDir -BackupDir $ctx.BackupDir -LogPath $extensionLog
-    if ($report.Installed.Count -gt 0) {
-        Write-UpdateLog -Message ('Re-registered {0} customer bundle(s)' -f $report.Installed.Count) -LogPath $State.LogPath
-    }
-    if ($report.Replaced.Count -gt 0) {
-        Write-UpdateLog -Message ('Upgraded {0} packaged bundle(s) to the installed version' -f $report.Replaced.Count) -LogPath $State.LogPath
-    }
-    foreach ($warning in $report.Warnings) {
+    $plan = New-ExtensionReinstallPlan -AppxHome $newDir -BackupDir $ctx.BackupDir -ProductZip $Row.Target.Path -LogPath $extensionLog
+
+    foreach ($warning in $plan.Warnings) {
         Write-UpdateLog -Level WARN -Message ('extension: {0}' -f $warning) -LogPath $State.LogPath
     }
 
-    # Confirm the new tree really carries every exported bundle before the old one is touched.
-    # A mismatch means the carry silently failed, which is exactly the 2026-11-17 incident.
-    Assert-ExtensionCarry -State $State -NewDir $newDir -Expected $exported -ProductSymbols $productSymbols
+    # Persist the reinstall list next to the run logs and in the backup directory, so the
+    # operator can act on it after the application comes back up.
+    $reinstallPath = Join-Path $ctx.UpdateLogDir 'extensions-to-reinstall.json'
+    $reinstallRows = @($plan.Reinstall | ForEach-Object {
+            [pscustomobject]@{
+                symbolic = $_.symbolic
+                version  = $_.version
+                file     = $_.file
+                backupJar = $_.jar
+            }
+        })
+    Write-JsonNoBom -Path $reinstallPath -Object $reinstallRows
+    Write-JsonNoBom -Path (Join-Path $ctx.BackupDir 'extensions-to-reinstall.json') -Object $reinstallRows
+
+    Assert-ExtensionPlan -State $State -Expected $exported -Plan $plan -ReinstallPath $reinstallPath
 
     $backup = Swap-Directory -LiveDir (Join-Path $ctx.Root 'appxserver') -NewDir $newDir -Stamp $ctx.Stamp
     Write-UpdateLog -Message ('Product swapped; previous installation kept at {0}' -f (Split-Path -Leaf $backup)) -LogPath $State.LogPath
@@ -761,24 +770,24 @@ function Clear-OsgiFrameworkState {
     Remove-Item -Path $pool -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-function Assert-ExtensionCarry {
-    param($State, [string]$NewDir, $Expected, $ProductSymbols)
+function Assert-ExtensionPlan {
+    param($State, $Expected, $Plan, [string]$ReinstallPath)
 
-    $expectedCount = @($Expected).Count
-    $found = @(Get-InstalledExtensionBundles -AppxHome $NewDir -ExcludeSymbolic @($ProductSymbols.Keys))
+    # Every exported bundle must end up in exactly one bucket: to reinstall, or skipped because
+    # the product already ships it. A bundle that falls through both would silently disappear,
+    # which is the 2026-11-17 incident.
+    $exportedSymbols = @($Expected | ForEach-Object { $_.symbolic })
+    $plannedSymbols = @(@($Plan.Reinstall | ForEach-Object { $_.symbolic }) + @($Plan.Skipped | ForEach-Object { ($_ -split ' ')[0] }))
+    $orphans = @($exportedSymbols | Where-Object { $plannedSymbols -notcontains $_ })
 
-    $expectedSymbols = @($Expected | ForEach-Object { $_.symbolic }) | Sort-Object
-    $foundSymbols = @($found | ForEach-Object { $_.Symbolic }) | Sort-Object
-    $missing = @($expectedSymbols | Where-Object { $foundSymbols -notcontains $_ })
+    $note = ('customer bundles: {0} exported, {1} to reinstall, {2} shipped by the product' -f `
+            $exportedSymbols.Count, @($Plan.Reinstall).Count, @($Plan.Skipped).Count)
+    Add-ReportNote -Report $State.Report -Text $note
+    Write-UpdateLog -Message $note -LogPath $State.LogPath
+    Write-UpdateLog -Message ('Reinstall list: {0}' -f $ReinstallPath) -LogPath $State.LogPath
 
-    $detail = ''
-    if ($missing.Count -gt 0) { $detail = '; missing: ' + ($missing -join ', ') }
-
-    Add-ReportNote -Report $State.Report -Text ('customer bundles carried: {0} exported, {1} present{2}' -f $expectedCount, $found.Count, $detail)
-    Write-UpdateLog -Message ('Customer bundle carry check: exported {0}, present {1}{2}' -f $expectedCount, $found.Count, $detail) -LogPath $State.LogPath
-
-    if ($missing.Count -gt 0 -or $found.Count -lt $expectedCount) {
-        throw ('customer bundle carry incomplete: exported {0}, found {1} in the new tree{2}. The previous tree is untouched; inspect {3}' -f $expectedCount, $found.Count, $detail, (Join-Path $State.Context.BackupDir 'extensions'))
+    if ($orphans.Count -gt 0) {
+        throw ('customer bundle plan incomplete: {0} exported but neither scheduled for reinstall nor explained. Inspect {1}' -f ($orphans -join ', '), $ReinstallPath)
     }
 }
 

@@ -227,20 +227,37 @@ It prints the plan, asks for `YES`, then:
 3. stops PostgreSQL
 4. swaps JDK / PostgreSQL / Python (and overlays pgvector) into place; the old directory
    becomes `<name>.bak-<stamp>`
-5. unpacks the product into `appxserver.new-<stamp>`, overlays `conf\`, copies the customer
-   bundles into the new tree's `plugins\` and registers them in
-   `configuration\org.eclipse.equinox.simpleconfigurator\bundles.info`, then renames it to
-   `appxserver` (the old one becomes `appxserver.bak-<stamp>`) - only after the carried count
-   matches what was exported
+5. unpacks the product into `appxserver.new-<stamp>`, overlays `conf\`, records what has to be
+   reinstalled without writing any load-time manifest, then renames it to `appxserver`
+   (the old one becomes `appxserver.bak-<stamp>`)
 6. starts PostgreSQL, runs `RUN_SyncDB`, `sign-database-build-alt` and `bin\db-lang.bat`
 7. verifies `AD_System`, the migration count, `bundles.info` and the extension states
 8. rewrites the zip names in `packages\packages.ini`, then prunes old backups
 9. stops PostgreSQL again, whether the update succeeded or failed
 
-Customer bundles - installed through **Extension Management**, the Felix web console, or moved
-to `plugins\` by a previous update - are carried over automatically. The baseline that decides
-what counts as "customer" comes from the **package's own `bundles.info`**, not from the live
-tree; if the carried count does not match, the update aborts and the previous tree is kept.
+### How customer bundles are handled
+
+The update does **not** write customer bundles into the new tree. It only:
+
+- backs the jars up to `runtime\backup\<stamp>\extensions\` (rollback and evidence)
+- writes the reinstall list `runtime\logs\update\<stamp>\extensions-to-reinstall.json`
+
+The baseline for "which bundles are customer bundles" comes from the **package's own
+`bundles.info`**, not from the live tree.
+
+**After the update you must reinstall those extensions through Extension Management**
+(System Admin -> Extension Management, Install each one). Reason: Extension Management calls
+`installBundle(downloadUrl)`, so the bundle's OSGi **location is an HTTP URL**, while a jar
+copied to `plugins\` and listed in `bundles.info` has a local path location. When the same
+symbolic name exists under two locations, the OSGi singleton rule can only resolve one of them:
+
+```
+Could not resolve module: org.idempiere.myappx.plugin.aic
+  Another singleton bundle selected: version="1.0.1.202611181609"
+```
+
+Copying the jars automatically therefore breaks Extension Management's upgrade and uninstall,
+so the update only backs them up and leaves the install to Extension Management.
 
 Report: `runtime\logs\update-report.txt`. Per-step logs: `runtime\logs\update\<stamp>\`.
 
@@ -250,6 +267,8 @@ After the update, start the tree in this order:
 start-db.bat
 run-appxserver.bat
 ```
+
+Then reinstall the extensions listed in the reinstall file through Extension Management.
 
 Useful switches:
 

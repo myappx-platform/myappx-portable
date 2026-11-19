@@ -1044,9 +1044,9 @@ function Get-ProductBundleSymbols {
     param([Parameter(Mandatory = $true)][string]$ZipPath)
 
     # The baseline for "what the product ships" must come from the package being installed, not
-    # from the live tree: Install-ExtensionBundles appends customer bundles to the live
-    # bundles.info, so using it as the baseline makes them look product-owned on the next run.
-    # The product archive always carries its own 388-entry bundles.info.
+    # from the live tree: a live tree may already list customer bundles (for example after an
+    # Extension Management install or an earlier update), and those must stay classified as
+    # customer bundles. The product archive always carries its own bundles.info.
     $entryName = 'appxserver/configuration/org.eclipse.equinox.simpleconfigurator/bundles.info'
     $text = $null
     try { $text = Get-ZipEntryText -ZipPath $ZipPath -EntryName $entryName } catch { }
@@ -1174,15 +1174,35 @@ function Export-ExtensionBundles {
     return $rows
 }
 
-function Install-ExtensionBundles {
+function New-ExtensionReinstallPlan {
     param(
         [Parameter(Mandatory = $true)][string]$AppxHome,
         [Parameter(Mandatory = $true)][string]$BackupDir,
+        [string]$ProductZip,
         [string]$LogPath
     )
 
+    # Extension Management installs a bundle with BundleContext.installBundle(downloadUrl, stream),
+    # so the bundle's OSGi location is the HTTP URL from AD_Extension.ExtensionMetadata.
+    # simpleconfigurator, on the other hand, installs whatever bundles.info lists with
+    # installBundle(location), where location is a plugins/... path.
+    #
+    # A bundle that exists under both locations is two different bundles with the same
+    # symbolic name, and a singleton bundle can only resolve from one of them. That is exactly
+    # the "Another singleton bundle selected" failure that left org.idempiere.myappx.plugin.aic
+    # in state ER on 2026-11-19.
+    #
+    # So the update must NOT register customer bundles in plugins/ + bundles.info. It only
+    # backs up the jars (evidence and rollback material) and records what has to be reinstalled
+    # through Extension Management once the new tree is up.
+    $report = [pscustomobject]@{
+        Reinstall = @()
+        Skipped   = @()
+        Warnings  = @()
+        BackupDir = $BackupDir
+    }
+
     $manifestPath = Join-Path $BackupDir 'extensions.json'
-    $report = [pscustomobject]@{ Installed = @(); Replaced = @(); Skipped = @(); Warnings = @() }
     if (-not (Test-Path $manifestPath)) { return $report }
 
     $raw = Get-Content -Path $manifestPath -Raw -Encoding UTF8
@@ -1195,32 +1215,18 @@ function Install-ExtensionBundles {
             if ($null -ne $item) { $entries += $item }
         }
     }
-    if ($entries.Count -eq 0) {
-        if ($LogPath) {
-            Write-TextNoBom -Path $LogPath -Text ("Extension bundles after product swap`r`ninstalled: 0`r`n")
-        }
-        return $report
-    }
 
-    $bundlesInfo = Join-Path $AppxHome 'configuration\org.eclipse.equinox.simpleconfigurator\bundles.info'
-    $existing = Get-BundlesInfoMap -BundlesInfoPath $bundlesInfo
-    $pluginsDir = Join-Path $AppxHome 'plugins'
-    New-DirectoryIfMissing -Path $pluginsDir | Out-Null
-
-    $lines = New-Object System.Collections.ArrayList
-    if (Test-Path $bundlesInfo) {
-        foreach ($line in [System.IO.File]::ReadAllLines($bundlesInfo)) { [void]$lines.Add($line) }
+    # "Ships with the product" must come from the package being installed. Reading the new tree's
+    # bundles.info would work too, but only while it is pristine - a carried-over or hand-edited
+    # file would make customer bundles look product-owned and skip them silently.
+    if ($ProductZip) {
+        $packaged = Get-ProductBundleSymbols -ZipPath $ProductZip
     } else {
-        # Should not happen: the product archive ships bundles.info. Start a valid file so the
-        # extension bundles are at least registered instead of silently disappearing.
-        $simpleDir = Split-Path -Parent $bundlesInfo
-        New-DirectoryIfMissing -Path $simpleDir | Out-Null
-        [void]$lines.Add('#encoding=UTF-8')
-        [void]$lines.Add('#version=1')
-        $report.Warnings += 'bundles.info was missing in the new product; created a new one'
+        $bundlesInfo = Join-Path $AppxHome 'configuration\org.eclipse.equinox.simpleconfigurator\bundles.info'
+        $packaged = Get-BundlesInfoMap -BundlesInfoPath $bundlesInfo
     }
 
-    foreach ($entry in @($entries)) {
+    foreach ($entry in $entries) {
         if (-not $entry.symbolic) { continue }
         $source = Join-Path (Join-Path $BackupDir 'extensions') $entry.file
         if (-not (Test-Path $source)) {
@@ -1228,47 +1234,38 @@ function Install-ExtensionBundles {
             continue
         }
 
-        $packaged = $existing[$entry.symbolic]
-        $replace = $false
-        if ($packaged) {
-            $cmp = Compare-VersionString -Left $entry.version -Right $packaged.Version
+        $inProduct = $packaged[$entry.symbolic]
+        if ($inProduct) {
+            $productVersion = $inProduct.Version
+            if (-not $productVersion) { $productVersion = '?' }
+            $cmp = Compare-VersionString -Left $entry.version -Right $productVersion
             if ($cmp -le 0) {
-                # The new product already ships this bundle at an equal or newer version.
-                $report.Skipped += ('{0} ({1}); product ships {2}' -f $entry.symbolic, $entry.version, $packaged.Version)
+                # The product ships this bundle at an equal or newer version. Installing the
+                # backup on top would create the duplicate-location conflict this function exists
+                # to avoid, so leave the packaged copy in charge.
+                $report.Skipped += ('{0} ({1}); product ships {2}' -f $entry.symbolic, $entry.version, $productVersion)
                 continue
             }
-            $replace = $true
+            $report.Warnings += ('{0}: backup {1} is newer than the packaged {2}; the packaged one stays' -f $entry.symbolic, $entry.version, $productVersion)
+            $report.Skipped += ('{0} ({1}); product ships {2}' -f $entry.symbolic, $entry.version, $productVersion)
+            continue
         }
 
-        Copy-Item -Path $source -Destination (Join-Path $pluginsDir $entry.file) -Force
-
-        if ($replace) {
-            # Point the packaged entry at the newer extension jar instead of registering twice.
-            $newPath = 'plugins/' + $entry.file
-            $newLine = ('{0},{1},{2},{3},{4}' -f $entry.symbolic, $entry.version, $newPath, $entry.startLevel, ([string]$entry.started).ToLower())
-            for ($i = 0; $i -lt $lines.Count; $i++) {
-                if ($lines[$i].StartsWith($entry.symbolic + ',')) { $lines[$i] = $newLine; break }
-            }
-            $packagedFile = Join-Path $pluginsDir (Split-Path -Leaf $packaged.Path)
-            if ((Split-Path -Leaf $packaged.Path) -ne $entry.file) {
-                Remove-Item -Path $packagedFile -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            $report.Replaced += ('{0} {1} (product had {2})' -f $entry.symbolic, $entry.version, $packaged.Version)
-        } else {
-            [void]$lines.Add(('{0},{1},plugins/{2},{3},{4}' -f $entry.symbolic, $entry.version, $entry.file, $entry.startLevel, ([string]$entry.started).ToLower()))
-            $report.Installed += ('{0} {1}' -f $entry.symbolic, $entry.version)
+        $report.Reinstall += [pscustomobject]@{
+            symbolic = $entry.symbolic
+            version  = $entry.version
+            file     = $entry.file
+            jar      = $source
         }
-        $existing[$entry.symbolic] = [pscustomobject]@{ Symbolic = $entry.symbolic; Version = $entry.version; Path = ('plugins/' + $entry.file) }
     }
-
-    [System.IO.File]::WriteAllLines($bundlesInfo, $lines, $script:Utf8NoBom)
 
     if ($LogPath) {
         $sb = New-Object System.Text.StringBuilder
-        [void]$sb.AppendLine('Extension bundles after product swap')
-        [void]$sb.AppendLine(('installed: {0}' -f $report.Installed.Count))
-        foreach ($item in $report.Installed) { [void]$sb.AppendLine(('  + {0}' -f $item)) }
-        foreach ($item in $report.Replaced) { [void]$sb.AppendLine(('  ^ {0}' -f $item)) }
+        [void]$sb.AppendLine('Customer bundles: reinstall through Extension Management')
+        [void]$sb.AppendLine(('to reinstall: {0}' -f @($report.Reinstall).Count))
+        foreach ($item in $report.Reinstall) {
+            [void]$sb.AppendLine(('  > {0} {1}' -f $item.symbolic, $item.version))
+        }
         foreach ($item in $report.Skipped) { [void]$sb.AppendLine(('  = {0}' -f $item)) }
         foreach ($item in $report.Warnings) { [void]$sb.AppendLine(('  ! {0}' -f $item)) }
         Write-TextNoBom -Path $LogPath -Text $sb.ToString()
