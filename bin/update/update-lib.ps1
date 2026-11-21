@@ -1075,16 +1075,25 @@ function Get-InstalledExtensionBundles {
         [string[]]$ExcludeSymbolic = @()
     )
 
-    # Customer bundles live in two places depending on how they were installed:
-    #   pool     - configuration\org.eclipse.osgi\<id>\0\bundleFile, written by Extension
-    #              Management / the Felix web console (BundleContext.installBundle)
-    #   plugins  - plugins\<symbolic>_<version>.jar, written by this update when it re-registers
-    #              bundles after a product swap
-    # Scanning only the pool silently returns 0 on a tree that a previous update populated, which
-    # is how the 2026-11-17 run dropped every customer bundle. Scan both, and let the pool win
-    # when the same symbolic name shows up twice (it is the authority the running framework uses).
+    # Customer bundles can be present in three shapes, because the installer changed over time:
+    #   pool        - configuration\org.eclipse.osgi\<id>\0\bundleFile (a jar), written by an
+    #                 Extension Management / Felix install via BundleContext.installBundle
+    #   plugins-dir - plugins\<symbolic>_<version>\ (a directory), written by the current
+    #                 Extension Management deploy path, and the same shape the product itself uses
+    #   plugins     - plugins\<symbolic>_<version>.jar, an older jar-shaped deploy
+    # All three shapes must be found. Missing one is how a product swap silently drops bundles:
+    # the 2026-11-17 run dropped them because only the pool was scanned, and looking only at jar
+    # files would drop every directory-shaped bundle the same way.
+    #
+    # Which copy wins when a symbolic name appears more than once is decided by bundles.info, not
+    # by scanning order. A pool entry can be a stale leftover after an update moved the bundle to
+    # plugins\: the framework then loads the plugins\ copy listed in bundles.info, and the pool
+    # copy is dead weight. Preferring the pool on principle would export the old version and
+    # silently roll the customer back.
     $bySymbolic = [ordered]@{}
     $notes = New-Object System.Collections.ArrayList
+
+    $candidates = New-Object System.Collections.ArrayList
 
     $pool = Join-Path $AppxHome 'configuration\org.eclipse.osgi'
     if (Test-Path $pool) {
@@ -1094,30 +1103,161 @@ function Get-InstalledExtensionBundles {
             $identity = Get-BundleFileIdentity -Path $bundleFile
             if (-not $identity) { continue }
             if ($ExcludeSymbolic -contains $identity.Symbolic) { continue }
-            $bySymbolic[$identity.Symbolic] = New-ExtensionBundleEntry -Identity $identity -Source $bundleFile -SourceKind 'pool'
+            [void]$candidates.Add((New-ExtensionBundleEntry -Identity $identity -Source $bundleFile -SourceKind 'pool'))
         }
     }
 
+    # Product-shipped bundles share the plugins\ directory with customer ones. $ExcludeSymbolic
+    # carries the product baseline, so they never reach here.
+
     $pluginsDir = Join-Path $AppxHome 'plugins'
     if (Test-Path $pluginsDir) {
+        # Directory shape first: it is what the current installer writes, and it is already the
+        # layout a product swap can carry over unchanged.
+        foreach ($dir in Get-ChildItem -Path $pluginsDir -Directory) {
+            $manifestPath = Join-Path $dir.FullName 'META-INF\MANIFEST.MF'
+            if (-not (Test-Path $manifestPath)) { continue }
+            $identity = Get-DirectoryBundleIdentity -Path $dir.FullName
+            if (-not $identity) { continue }
+            if ($ExcludeSymbolic -contains $identity.Symbolic) { continue }
+            [void]$candidates.Add((New-ExtensionBundleEntry -Identity $identity -Source $dir.FullName -SourceKind 'plugins-dir'))
+        }
+
         foreach ($file in Get-ChildItem -Path $pluginsDir -File) {
             if ($file.Extension -ne '.jar') { continue }
             $identity = Get-BundleFileIdentity -Path $file.FullName
             if (-not $identity) { continue }
             if ($ExcludeSymbolic -contains $identity.Symbolic) { continue }
-            if ($bySymbolic.Contains($identity.Symbolic)) {
-                # Both copies exist. Keep the pool entry so the exported jar matches what the
-                # framework actually resolves, and report the duplicate instead of hiding it.
-                [void]$notes.Add(('{0} exists in both the OSGi pool and plugins\; using the pool copy' -f $identity.Symbolic))
-                continue
-            }
-            $bySymbolic[$identity.Symbolic] = New-ExtensionBundleEntry -Identity $identity -Source $file.FullName -SourceKind 'plugins'
+            [void]$candidates.Add((New-ExtensionBundleEntry -Identity $identity -Source $file.FullName -SourceKind 'plugins'))
+        }
+    }
+
+    # Resolve duplicates: a plugins\ copy outranks the pool (it is the location bundles.info
+    # registers once an update has run), and the newest version wins inside the same shape.
+    foreach ($entry in $candidates) {
+        if (-not $bySymbolic.Contains($entry.Symbolic)) {
+            $bySymbolic[$entry.Symbolic] = $entry
+            continue
+        }
+        $current = $bySymbolic[$entry.Symbolic]
+        if ($entry.SourceKind -eq 'pool' -and $current.SourceKind -ne 'pool') {
+            [void]$notes.Add(('{0}: ignoring the OSGi pool copy ({1}) because plugins\ holds {2}' -f $entry.Symbolic, $entry.Version, $current.Version))
+            continue
+        }
+        if ($entry.SourceKind -ne 'pool' -and $current.SourceKind -eq 'pool') {
+            [void]$notes.Add(('{0}: ignoring the OSGi pool copy ({1}) because plugins\ holds {2}' -f $current.Symbolic, $current.Version, $entry.Version))
+            $bySymbolic[$entry.Symbolic] = $entry
+            continue
+        }
+        if ((Compare-VersionString -Left $entry.Version -Right $current.Version) -gt 0) {
+            [void]$notes.Add(('{0}: keeping {1} over {2} (same location, newer version)' -f $entry.Symbolic, $entry.Version, $current.Version))
+            $bySymbolic[$entry.Symbolic] = $entry
+        } else {
+            [void]$notes.Add(('{0}: keeping {1} over {2} (same location, older version ignored)' -f $entry.Symbolic, $current.Version, $entry.Version))
         }
     }
 
     $result = @($bySymbolic.Values)
+
+    # Fill in Require-Bundle for every entry. Only requirements that are themselves customer
+    # bundles matter: anything else is either shipped by the product or provided by the framework.
+    $customerSymbols = @{}
+    foreach ($entry in $result) { $customerSymbols[$entry.Symbolic] = $true }
+    foreach ($entry in $result) {
+        $entry.Requires = @(Get-BundleRequirements -BundlePath $entry.Source -CustomerSymbols $customerSymbols -Self $entry.Symbolic)
+    }
+
     foreach ($note in $notes) { Write-UpdateLog -Level WARN -Message ('extension: ' + $note) }
     return $result
+}
+
+# Identity of a directory-shaped bundle.
+#
+# A directory bundle keeps its manifest at META-INF\MANIFEST.MF, exactly like a jar. This is the
+# shape both the product and the current Extension Management deploy path use
+# (Eclipse-BundleShape: dir), so it has to be readable without unzipping anything.
+function Get-DirectoryBundleIdentity {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $manifestPath = Join-Path $Path 'META-INF\MANIFEST.MF'
+    if (-not (Test-Path $manifestPath)) { return $null }
+    $manifest = $null
+    try { $manifest = [System.IO.File]::ReadAllText($manifestPath) } catch { return $null }
+    if (-not $manifest) { return $null }
+    # Re-join continuation lines: a manifest wraps at 72 bytes, so a long Bundle-SymbolicName is
+    # split across physical lines with a leading space.
+    $unfolded = $manifest -replace "`r`n ", ''
+    $identity = Read-ManifestIdentity -Text $unfolded
+    if (-not $identity.Symbolic) { return $null }
+    return $identity
+}
+
+# Customer bundles a bundle requires.
+#
+# Reads Require-Bundle only. Import-Package is deliberately ignored: package wires are resolved
+# against whatever exports the package, which for customer bundles means the product or the
+# framework, never another customer bundle in a way this update has to preserve.
+#
+# Optional requirements are skipped. A missing optional bundle is legal and must not be reported
+# as a broken dependency.
+function Get-BundleRequirements {
+    param(
+        [Parameter(Mandatory = $true)][string]$BundlePath,
+        [hashtable]$CustomerSymbols,
+        [string]$Self
+    )
+
+    $manifest = $null
+    if (Test-Path -Path $BundlePath -PathType Container) {
+        if (-not (Test-Path (Join-Path $BundlePath 'META-INF\MANIFEST.MF'))) { return @() }
+        try { $manifest = [System.IO.File]::ReadAllText((Join-Path $BundlePath 'META-INF\MANIFEST.MF')) } catch { return @() }
+    } else {
+        try { $manifest = Get-ZipEntryText -ZipPath $BundlePath -EntryName 'META-INF/MANIFEST.MF' } catch { return @() }
+    }
+    if (-not $manifest) { return @() }
+
+    $unfolded = $manifest -replace "`r`n ", ''
+    $headerValue = $null
+    foreach ($line in ($unfolded -split "`r?`n")) {
+        if ($line -match '^Require-Bundle:\s*(.+)$') { $headerValue = $Matches[1]; break }
+    }
+    if (-not $headerValue) { return @() }
+
+    $requires = New-Object System.Collections.ArrayList
+    foreach ($clause in (Split-HostHeaderClauses -Value $headerValue)) {
+        if (-not $clause) { continue }
+        # A clause is "symbolicName;bundle-version=...;resolution:=optional".
+        if ($clause -match 'resolution\s*:?=\s*"?optional"?') { continue }
+        $name = ($clause -split ';')[0].Trim()
+        if (-not $name) { continue }
+        if ($Self -and $name -eq $Self) { continue }
+        if ($null -ne $CustomerSymbols -and -not $CustomerSymbols.ContainsKey($name)) { continue }
+        if ($requires -notcontains $name) { [void]$requires.Add($name) }
+    }
+    return @($requires)
+}
+
+# Split an OSGi header into clauses on commas outside quotes.
+function Split-HostHeaderClauses {
+    param([string]$Value)
+
+    $clauses = New-Object System.Collections.ArrayList
+    if (-not $Value) { return @() }
+    $current = New-Object System.Text.StringBuilder
+    $inQuote = $false
+    foreach ($ch in $Value.ToCharArray()) {
+        if ($ch -eq '"') { $inQuote = -not $inQuote; [void]$current.Append($ch); continue }
+        if ($ch -eq ',' -and -not $inQuote) {
+            $clause = $current.ToString().Trim()
+            if ($clause) { [void]$clauses.Add($clause) }
+            [void]$current.Clear()
+            continue
+        }
+        [void]$current.Append($ch)
+    }
+    $tail = $current.ToString().Trim()
+    if ($tail) { [void]$clauses.Add($tail) }
+    return @($clauses)
 }
 
 function Get-BundleFileIdentity {
@@ -1138,14 +1278,21 @@ function New-ExtensionBundleEntry {
 
     $version = $Identity.Version
     if (-not $version) { $version = '0.0.0' }
+    $isDir = ($SourceKind -eq 'plugins-dir')
     return [pscustomobject]@{
         Symbolic = $Identity.Symbolic
         Version = $version
         Source = $Source
         SourceKind = $SourceKind
+        # Directory deployments are exported as directories too, so the backup always has one
+        # shape: plugins/<symbolic>_<version>/. A jar (pool or plugins) is unpacked into that
+        # directory on export.
+        Shape = $(if ($isDir) { 'dir' } else { 'jar' })
+        DirName = ('{0}_{1}' -f $Identity.Symbolic, $version)
         File = ('{0}_{1}.jar' -f $Identity.Symbolic, $version)
         StartLevel = 4
         Started = $true
+        Requires = @()
     }
 }
 
@@ -1155,19 +1302,34 @@ function Export-ExtensionBundles {
         [Parameter(Mandatory = $true)][string]$BackupDir
     )
 
+    # Everything is exported as a directory, whatever it was on disk. Keeping one shape means the
+    # restore step has a single code path, and a directory is what the framework expects for these
+    # bundles anyway (Eclipse-BundleShape: dir). It also replaces the ephemeral location that a
+    # pool install carries - installBundle(stream) points at a temp file which no longer exists.
     $target = Join-Path $BackupDir 'extensions'
     New-DirectoryIfMissing -Path $target | Out-Null
     $rows = @()
     foreach ($bundle in $Bundles) {
-        $dest = Join-Path $target $bundle.File
-        Copy-Item -Path $bundle.Source -Destination $dest -Force
+        $dest = Join-Path $target $bundle.DirName
+        if (Test-Path $dest) { Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue }
+
+        if ($bundle.SourceKind -eq 'plugins-dir') {
+            Copy-Item -Path $bundle.Source -Destination $dest -Recurse -Force
+        } else {
+            # A jar (pool bundleFile or plugins jar) is unpacked so the export matches the
+            # directory layout the restore step writes back.
+            Expand-ZipToDirectory -ZipPath $bundle.Source -Destination $dest -Marker 'META-INF/MANIFEST.MF' -Label $bundle.Symbolic
+        }
+
         $rows += [pscustomobject]@{
-            symbolic = $bundle.Symbolic
-            version = $bundle.Version
-            file = $bundle.File
-            startLevel = $bundle.StartLevel
-            started = $bundle.Started
-            sourceKind = $bundle.SourceKind
+            symbolic    = $bundle.Symbolic
+            version     = $bundle.Version
+            dir         = $bundle.DirName
+            shape       = 'dir'
+            requires    = @($bundle.Requires)
+            startLevel  = $bundle.StartLevel
+            started     = $bundle.Started
+            sourceKind  = $bundle.SourceKind
         }
     }
     Write-JsonNoBom -Path (Join-Path $BackupDir 'extensions.json') -Object @($rows)
@@ -1182,21 +1344,23 @@ function New-ExtensionReinstallPlan {
         [string]$LogPath
     )
 
-    # Extension Management installs a bundle with BundleContext.installBundle(downloadUrl, stream),
-    # so the bundle's OSGi location is the HTTP URL from AD_Extension.ExtensionMetadata.
-    # simpleconfigurator, on the other hand, installs whatever bundles.info lists with
-    # installBundle(location), where location is a plugins/... path.
+    # Customer bundles are carried over, not reinstalled by hand.
     #
-    # A bundle that exists under both locations is two different bundles with the same
-    # symbolic name, and a singleton bundle can only resolve from one of them. That is exactly
-    # the "Another singleton bundle selected" failure that left org.idempiere.myappx.plugin.aic
-    # in state ER on 2026-11-19.
+    # The current Extension Management deploy path writes plugins/<symbolic>_<version>/ and one
+    # bundles.info line - the same shape the product itself uses - so a customer bundle can simply
+    # be copied into the new tree and registered. That is what this plan describes.
     #
-    # So the update must NOT register customer bundles in plugins/ + bundles.info. It only
-    # backs up the jars (evidence and rollback material) and records what has to be reinstalled
-    # through Extension Management once the new tree is up.
+    # A bundle installed through BundleContext.installBundle(stream) is different: its OSGi
+    # location is a temp file that no longer exists, and re-registering it under a plugins/ path
+    # would give the same symbolic name a second location. A singleton bundle can only resolve from
+    # one location, which is the "Another singleton bundle selected" failure that left
+    # org.idempiere.myappx.plugin.aic in state ER on 2026-11-19.
+    #
+    # Exporting everything as a directory removes that distinction: after the swap every customer
+    # bundle has exactly one location, plugins/<symbolic>_<version>/, and the ephemeral temp
+    # location is gone for good.
     $report = [pscustomobject]@{
-        Reinstall = @()
+        CarryOver = @()
         Skipped   = @()
         Warnings  = @()
         BackupDir = $BackupDir
@@ -1228,9 +1392,11 @@ function New-ExtensionReinstallPlan {
 
     foreach ($entry in $entries) {
         if (-not $entry.symbolic) { continue }
-        $source = Join-Path (Join-Path $BackupDir 'extensions') $entry.file
+        $dirName = $entry.dir
+        if (-not $dirName) { $dirName = ('{0}_{1}' -f $entry.symbolic, $entry.version) }
+        $source = Join-Path (Join-Path $BackupDir 'extensions') $dirName
         if (-not (Test-Path $source)) {
-            $report.Warnings += ('jar missing in backup: {0}' -f $entry.file)
+            $report.Warnings += ('exported bundle missing in backup: {0}' -f $dirName)
             continue
         }
 
@@ -1240,9 +1406,9 @@ function New-ExtensionReinstallPlan {
             if (-not $productVersion) { $productVersion = '?' }
             $cmp = Compare-VersionString -Left $entry.version -Right $productVersion
             if ($cmp -le 0) {
-                # The product ships this bundle at an equal or newer version. Installing the
-                # backup on top would create the duplicate-location conflict this function exists
-                # to avoid, so leave the packaged copy in charge.
+                # The product ships this bundle at an equal or newer version. Registering the
+                # backup on top would shadow a newer product copy, so leave the packaged one in
+                # charge.
                 $report.Skipped += ('{0} ({1}); product ships {2}' -f $entry.symbolic, $entry.version, $productVersion)
                 continue
             }
@@ -1251,20 +1417,22 @@ function New-ExtensionReinstallPlan {
             continue
         }
 
-        $report.Reinstall += [pscustomobject]@{
+        $report.CarryOver += [pscustomobject]@{
             symbolic = $entry.symbolic
             version  = $entry.version
-            file     = $entry.file
-            jar      = $source
+            dir      = $dirName
+            source   = $source
+            requires = @($entry.requires)
         }
     }
 
     if ($LogPath) {
         $sb = New-Object System.Text.StringBuilder
-        [void]$sb.AppendLine('Customer bundles: reinstall through Extension Management')
-        [void]$sb.AppendLine(('to reinstall: {0}' -f @($report.Reinstall).Count))
-        foreach ($item in $report.Reinstall) {
-            [void]$sb.AppendLine(('  > {0} {1}' -f $item.symbolic, $item.version))
+        [void]$sb.AppendLine('Customer bundles: carry over into the new tree')
+        [void]$sb.AppendLine(('to carry over: {0}' -f @($report.CarryOver).Count))
+        foreach ($item in $report.CarryOver) {
+            $deps = if ($item.requires -and $item.requires.Count -gt 0) { ' -> ' + ($item.requires -join ', ') } else { ' (no customer-bundle dependency)' }
+            [void]$sb.AppendLine(('  > {0} {1}{2}' -f $item.symbolic, $item.version, $deps))
         }
         foreach ($item in $report.Skipped) { [void]$sb.AppendLine(('  = {0}' -f $item)) }
         foreach ($item in $report.Warnings) { [void]$sb.AppendLine(('  ! {0}' -f $item)) }

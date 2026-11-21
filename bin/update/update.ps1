@@ -7,6 +7,22 @@
 # Strategy: extract each component side by side, swap directories, keep the old copy as
 # <name>.bak-<stamp>. PostgreSQL major changes go through pg_upgrade.
 #
+# Customer bundles installed through Extension Management survive the product swap by being
+# carried over: their directory is copied into the new tree and one bundles.info line is added,
+# which is the same shape the product uses for its own bundles. They are found in all three
+# shapes an install can leave behind (OSGi pool bundleFile, plugins\<sn>_<ver>\ directory, and the
+# older plugins\<sn>_<ver>.jar), exported uniformly as directories, and re-registered together
+# with their Require-Bundle relations checked afterwards.
+#
+# Why not p2: converting these bundles into p2 installable units was evaluated and rejected.
+# (1) The migration problem does not go away - the p2 profile stores absolute install paths, so a
+# product swap invalidates it exactly like plugins\ does, and it would have to be rewritten too.
+# (2) Applying a p2 change uses ConfigApplier, which calls refreshBundles; the AI Copilot web
+# bundle has a refresh closure of 119 bundles including org.adempiere.ui.zk and
+# org.adempiere.server, which tears down the deployed web contexts. (3) It adds IU metadata, a
+# category.xml and an artifact repository to maintain, for no gain over one directory copy plus
+# one registry line.
+#
 # This file only orchestrates; helpers live in update-lib.ps1.
 
 [CmdletBinding()]
@@ -723,11 +739,10 @@ function Invoke-ProductSwap {
     # half-populated bundle pool must not shadow what bundles.info declares.
     Clear-OsgiFrameworkState -State $State -AppxHome $newDir
 
-    # Customer bundles are NOT re-registered here. Extension Management installs them with an
-    # HTTP location (installBundle(downloadUrl, stream)); writing the same jar to plugins/ and
-    # listing it in bundles.info would give the bundle a second, different location, and a
-    # singleton bundle cannot resolve from two locations at once ("Another singleton bundle
-    # selected"). Export only: keep the jars as evidence plus a reinstall list.
+    # Customer bundles are carried over as directories plus a bundles.info line, which is exactly
+    # the shape the product uses for its own bundles. Nothing is reinstalled through Extension
+    # Management: that would leave the bundle with an ephemeral installBundle location and risk a
+    # duplicate location for the same singleton symbolic name.
     $exported = @(Export-LiveExtensions -State $State -AppxHome (Join-Path $ctx.Root 'appxserver') -ProductZip $Row.Target.Path)
     $extensionLog = Join-Path $ctx.UpdateLogDir 'extensions.log'
     $plan = New-ExtensionReinstallPlan -AppxHome $newDir -BackupDir $ctx.BackupDir -ProductZip $Row.Target.Path -LogPath $extensionLog
@@ -736,15 +751,15 @@ function Invoke-ProductSwap {
         Write-UpdateLog -Level WARN -Message ('extension: {0}' -f $warning) -LogPath $State.LogPath
     }
 
-    # Persist the reinstall list next to the run logs and in the backup directory, so the
-    # operator can act on it after the application comes back up.
+    # Persist the carry-over list next to the run logs and in the backup directory, so the
+    # operator can confirm what the new tree is expected to contain.
     $reinstallPath = Join-Path $ctx.UpdateLogDir 'extensions-to-reinstall.json'
-    $reinstallRows = @($plan.Reinstall | ForEach-Object {
+    $reinstallRows = @($plan.CarryOver | ForEach-Object {
             [pscustomobject]@{
                 symbolic = $_.symbolic
                 version  = $_.version
-                file     = $_.file
-                backupJar = $_.jar
+                dir      = $_.dir
+                requires = @($_.requires)
             }
         })
     Write-JsonNoBom -Path $reinstallPath -Object $reinstallRows
@@ -752,8 +767,80 @@ function Invoke-ProductSwap {
 
     Assert-ExtensionPlan -State $State -Expected $exported -Plan $plan -ReinstallPath $reinstallPath
 
+    Restore-CustomerBundles -State $State -AppxHome $newDir -Plan $plan
+
     $backup = Swap-Directory -LiveDir (Join-Path $ctx.Root 'appxserver') -NewDir $newDir -Stamp $ctx.Stamp
     Write-UpdateLog -Message ('Product swapped; previous installation kept at {0}' -f (Split-Path -Leaf $backup)) -LogPath $State.LogPath
+}
+
+function Restore-CustomerBundles {
+    param($State, [string]$AppxHome, $Plan)
+
+    # Copy each carried-over bundle into the new tree and register it in bundles.info. Doing this
+    # on $newDir before the swap means the product swap installs a tree that is complete on first
+    # boot - there is no window where the application runs with missing bundles.
+    #
+    # bundles.info order does not matter: simpleconfigurator installs every entry first and only
+    # then starts them by start level, so a bundle listed before its dependency still resolves.
+    $carry = @($Plan.CarryOver)
+    if ($carry.Count -eq 0) {
+        Write-UpdateLog -Message 'No customer bundles to carry over.' -LogPath $State.LogPath
+        return
+    }
+
+    $pluginsDir = Join-Path $AppxHome 'plugins'
+    New-DirectoryIfMissing -Path $pluginsDir | Out-Null
+    $bundlesInfo = Join-Path $AppxHome 'configuration\org.eclipse.equinox.simpleconfigurator\bundles.info'
+    if (-not (Test-Path $bundlesInfo)) {
+        throw ('cannot register customer bundles: bundles.info missing in the new tree ({0})' -f $bundlesInfo)
+    }
+
+    foreach ($item in $carry) {
+        $dest = Join-Path $pluginsDir $item.dir
+        if (Test-Path $dest) { Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue }
+        Copy-Item -Path $item.source -Destination $dest -Recurse -Force
+        Write-UpdateLog -Message ('Carried over {0} {1} -> plugins/{2}' -f $item.symbolic, $item.version, $item.dir) -LogPath $State.LogPath
+    }
+
+    # Rewrite bundles.info once: remove any existing line for a carried-over symbolic name so a
+    # repeated update cannot accumulate duplicates, then append the registered entries.
+    $lines = New-Object System.Collections.ArrayList
+    foreach ($line in [System.IO.File]::ReadAllLines($bundlesInfo)) { [void]$lines.Add($line) }
+    $carried = @{}
+    foreach ($item in $carry) { $carried[$item.symbolic] = $true }
+
+    $kept = New-Object System.Collections.ArrayList
+    foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith('#')) { [void]$kept.Add($line); continue }
+        $name = ($trimmed.Split(','))[0]
+        if ($carried.ContainsKey($name)) { continue }
+        [void]$kept.Add($line)
+    }
+    foreach ($item in $carry) {
+        [void]$kept.Add(('{0},{1},plugins/{2}/,{3},{4}' -f $item.symbolic, $item.version, $item.dir, 4, 'true'))
+    }
+    Write-TextNoBom -Path $bundlesInfo -Text (($kept -join "`r`n") + "`r`n")
+
+    Write-UpdateLog -Message ('Registered {0} customer bundle(s) in the new tree bundles.info' -f $carry.Count) -LogPath $State.LogPath
+
+    # Dependency view for the report: makes an incomplete set obvious before boot rather than at
+    # the first use of a feature.
+    $registered = @{}
+    foreach ($line in $kept) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
+        $parts = $trimmed.Split(',')
+        if ($parts.Count -ge 1) { $registered[$parts[0]] = $true }
+    }
+    foreach ($item in $carry) {
+        foreach ($needed in @($item.requires)) {
+            if (-not $registered.ContainsKey($needed)) {
+                $State.Report.Notes.Add(('extension dependency missing: {0} requires {1}' -f $item.symbolic, $needed))
+            }
+        }
+    }
+    Add-ReportNote -Report $State.Report -Text ('customer bundles carried over: {0}' -f $carry.Count)
 }
 
 function Clear-OsgiFrameworkState {
@@ -773,21 +860,21 @@ function Clear-OsgiFrameworkState {
 function Assert-ExtensionPlan {
     param($State, $Expected, $Plan, [string]$ReinstallPath)
 
-    # Every exported bundle must end up in exactly one bucket: to reinstall, or skipped because
+    # Every exported bundle must end up in exactly one bucket: carried over, or skipped because
     # the product already ships it. A bundle that falls through both would silently disappear,
     # which is the 2026-11-17 incident.
     $exportedSymbols = @($Expected | ForEach-Object { $_.symbolic })
-    $plannedSymbols = @(@($Plan.Reinstall | ForEach-Object { $_.symbolic }) + @($Plan.Skipped | ForEach-Object { ($_ -split ' ')[0] }))
+    $plannedSymbols = @(@($Plan.CarryOver | ForEach-Object { $_.symbolic }) + @($Plan.Skipped | ForEach-Object { ($_ -split ' ')[0] }))
     $orphans = @($exportedSymbols | Where-Object { $plannedSymbols -notcontains $_ })
 
-    $note = ('customer bundles: {0} exported, {1} to reinstall, {2} shipped by the product' -f `
-            $exportedSymbols.Count, @($Plan.Reinstall).Count, @($Plan.Skipped).Count)
+    $note = ('customer bundles: {0} exported, {1} to carry over, {2} shipped by the product' -f `
+            $exportedSymbols.Count, @($Plan.CarryOver).Count, @($Plan.Skipped).Count)
     Add-ReportNote -Report $State.Report -Text $note
     Write-UpdateLog -Message $note -LogPath $State.LogPath
-    Write-UpdateLog -Message ('Reinstall list: {0}' -f $ReinstallPath) -LogPath $State.LogPath
+    Write-UpdateLog -Message ('Carry-over list: {0}' -f $ReinstallPath) -LogPath $State.LogPath
 
     if ($orphans.Count -gt 0) {
-        throw ('customer bundle plan incomplete: {0} exported but neither scheduled for reinstall nor explained. Inspect {1}' -f ($orphans -join ', '), $ReinstallPath)
+        throw ('customer bundle plan incomplete: {0} exported but neither carried over nor explained. Inspect {1}' -f ($orphans -join ', '), $ReinstallPath)
     }
 }
 
@@ -914,6 +1001,43 @@ function Invoke-Verify {
         [void]$problems.Add('bundles.info is missing after the product swap')
     }
     Write-UpdateLog -Message ('bundles.info entries: {0}' -f $bundleCount) -LogPath $State.LogPath
+
+    # Customer bundles must be registered in the new tree, and every customer-bundle dependency
+    # between them must still be satisfied. A missing dependent does not fail the boot - OSGi
+    # leaves it in INSTALLED and the feature breaks later with an unrelated error - so this is the
+    # only place it can be caught while the cause is still obvious.
+    $carryPath = Join-Path $ctx.UpdateLogDir 'extensions-to-reinstall.json'
+    if (Test-Path $carryPath) {
+        $carried = @()
+        $carryRaw = Get-Content -Path $carryPath -Raw -Encoding UTF8
+        if ($carryRaw -and $carryRaw.Trim()) {
+            $decoded = $carryRaw | ConvertFrom-Json
+            foreach ($item in @($decoded)) { if ($null -ne $item) { $carried += $item } }
+        }
+        if ($carried.Count -gt 0) {
+            $registered = @{}
+            if (Test-Path $bundlesInfo) {
+                foreach ($name in (Get-BundlesInfoMap -BundlesInfoPath $bundlesInfo).Keys) { $registered[$name] = $true }
+            }
+            $missing = New-Object System.Collections.ArrayList
+            foreach ($item in $carried) {
+                if (-not $registered.ContainsKey($item.symbolic)) {
+                    [void]$missing.Add(('{0} (exported but not registered in bundles.info)' -f $item.symbolic))
+                    continue
+                }
+                foreach ($needed in @($item.requires)) {
+                    if (-not $registered.ContainsKey($needed)) {
+                        [void]$missing.Add(('{0} requires {1} (not registered)' -f $item.symbolic, $needed))
+                    }
+                }
+            }
+            if ($missing.Count -gt 0) {
+                [void]$problems.Add(('customer bundle verification failed: {0}' -f ($missing -join '; ')))
+            } else {
+                Add-ReportNote -Report $State.Report -Text ('customer bundles verified: {0} registered, dependencies satisfied' -f $carried.Count)
+            }
+        }
+    }
 
     $appxMarker = Join-Path $ctx.Root 'appxserver\idempiere.ini'
     if (-not (Test-Path $appxMarker)) { [void]$problems.Add('appxserver\idempiere.ini is missing') }
