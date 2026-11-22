@@ -759,6 +759,8 @@ function Invoke-ProductSwap {
                 symbolic = $_.symbolic
                 version  = $_.version
                 dir      = $_.dir
+                entry    = $_.entry
+                shape    = $_.shape
                 requires = @($_.requires)
             }
         })
@@ -796,10 +798,20 @@ function Restore-CustomerBundles {
     }
 
     foreach ($item in $carry) {
-        $dest = Join-Path $pluginsDir $item.dir
+        $shape = $item.shape
+        if (-not $shape) { $shape = 'dir' }
+        $entryName = $item.entry
+        if (-not $entryName) {
+            $entryName = $(if ($shape -eq 'jar') { ('{0}_{1}.jar' -f $item.symbolic, $item.version) } else { $item.dir })
+        }
+        $dest = Join-Path $pluginsDir $entryName
         if (Test-Path $dest) { Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue }
-        Copy-Item -Path $item.source -Destination $dest -Recurse -Force
-        Write-UpdateLog -Message ('Carried over {0} {1} -> plugins/{2}' -f $item.symbolic, $item.version, $item.dir) -LogPath $State.LogPath
+        if ($shape -eq 'jar') {
+            Copy-Item -Path $item.source -Destination $dest -Force
+        } else {
+            Copy-Item -Path $item.source -Destination $dest -Recurse -Force
+        }
+        Write-UpdateLog -Message ('Carried over {0} {1} -> plugins/{2} ({3})' -f $item.symbolic, $item.version, $entryName, $shape) -LogPath $State.LogPath
     }
 
     # Rewrite bundles.info once: remove any existing line for a carried-over symbolic name so a
@@ -818,7 +830,17 @@ function Restore-CustomerBundles {
         [void]$kept.Add($line)
     }
     foreach ($item in $carry) {
-        [void]$kept.Add(('{0},{1},plugins/{2}/,{3},{4}' -f $item.symbolic, $item.version, $item.dir, 4, 'true'))
+        # The path field mirrors the shape: plugins/<name>_<ver>/ for a directory,
+        # plugins/<name>_<ver>.jar for a jar. simpleconfigurator keys off this string alone, so it
+        # has to match what was actually written to disk.
+        $shape = $item.shape
+        if (-not $shape) { $shape = 'dir' }
+        $entryName = $item.entry
+        if (-not $entryName) {
+            $entryName = $(if ($shape -eq 'jar') { ('{0}_{1}.jar' -f $item.symbolic, $item.version) } else { $item.dir })
+        }
+        $relative = $(if ($shape -eq 'jar') { 'plugins/{0}' -f $entryName } else { 'plugins/{0}/' -f $entryName })
+        [void]$kept.Add(('{0},{1},{2},{3},{4}' -f $item.symbolic, $item.version, $relative, 4, 'true'))
     }
     Write-TextNoBom -Path $bundlesInfo -Text (($kept -join "`r`n") + "`r`n")
 

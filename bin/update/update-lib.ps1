@@ -1302,22 +1302,27 @@ function Export-ExtensionBundles {
         [Parameter(Mandatory = $true)][string]$BackupDir
     )
 
-    # Everything is exported as a directory, whatever it was on disk. Keeping one shape means the
-    # restore step has a single code path, and a directory is what the framework expects for these
-    # bundles anyway (Eclipse-BundleShape: dir). It also replaces the ephemeral location that a
-    # pool install carries - installBundle(stream) points at a temp file which no longer exists.
+    # The export keeps the shape the bundle has on disk, so a jar stays a jar and a directory stays
+    # a directory. Copying that shape back after the swap preserves the layout the operator already
+    # has, instead of silently converting every plain bundle into a directory.
+    #
+    # A pool bundleFile is always exported as a directory: its OSGi location is an installBundle
+    # stream that pointed at a temp file which no longer exists, so it has no shape worth keeping.
     $target = Join-Path $BackupDir 'extensions'
     New-DirectoryIfMissing -Path $target | Out-Null
     $rows = @()
     foreach ($bundle in $Bundles) {
-        $dest = Join-Path $target $bundle.DirName
+        $shape = $(if ($bundle.SourceKind -eq 'plugins' -and $bundle.Source -like '*.jar') { 'jar' } else { 'dir' })
+        $entryName = $(if ($shape -eq 'jar') { $bundle.File } else { $bundle.DirName })
+        $dest = Join-Path $target $entryName
         if (Test-Path $dest) { Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue }
 
-        if ($bundle.SourceKind -eq 'plugins-dir') {
+        if ($shape -eq 'jar') {
+            Copy-Item -Path $bundle.Source -Destination $dest -Force
+        } elseif ($bundle.SourceKind -eq 'plugins-dir') {
             Copy-Item -Path $bundle.Source -Destination $dest -Recurse -Force
         } else {
-            # A jar (pool bundleFile or plugins jar) is unpacked so the export matches the
-            # directory layout the restore step writes back.
+            # A pool bundleFile is a jar: unpack it so the export is a usable directory.
             Expand-ZipToDirectory -ZipPath $bundle.Source -Destination $dest -Marker 'META-INF/MANIFEST.MF' -Label $bundle.Symbolic
         }
 
@@ -1325,7 +1330,9 @@ function Export-ExtensionBundles {
             symbolic    = $bundle.Symbolic
             version     = $bundle.Version
             dir         = $bundle.DirName
-            shape       = 'dir'
+            file        = $bundle.File
+            entry       = $entryName
+            shape       = $shape
             requires    = @($bundle.Requires)
             startLevel  = $bundle.StartLevel
             started     = $bundle.Started
@@ -1392,11 +1399,19 @@ function New-ExtensionReinstallPlan {
 
     foreach ($entry in $entries) {
         if (-not $entry.symbolic) { continue }
+        # The export records the shape it produced; older manifests have no field, and those were
+        # always directories.
+        $shape = $entry.shape
+        if (-not $shape) { $shape = 'dir' }
+        $entryName = $entry.entry
+        if (-not $entryName) {
+            $entryName = $(if ($shape -eq 'jar') { ('{0}_{1}.jar' -f $entry.symbolic, $entry.version) } else { ('{0}_{1}' -f $entry.symbolic, $entry.version) })
+        }
         $dirName = $entry.dir
         if (-not $dirName) { $dirName = ('{0}_{1}' -f $entry.symbolic, $entry.version) }
-        $source = Join-Path (Join-Path $BackupDir 'extensions') $dirName
+        $source = Join-Path (Join-Path $BackupDir 'extensions') $entryName
         if (-not (Test-Path $source)) {
-            $report.Warnings += ('exported bundle missing in backup: {0}' -f $dirName)
+            $report.Warnings += ('exported bundle missing in backup: {0}' -f $entryName)
             continue
         }
 
@@ -1421,6 +1436,8 @@ function New-ExtensionReinstallPlan {
             symbolic = $entry.symbolic
             version  = $entry.version
             dir      = $dirName
+            entry    = $entryName
+            shape    = $shape
             source   = $source
             requires = @($entry.requires)
         }
